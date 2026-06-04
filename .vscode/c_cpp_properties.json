@@ -1,0 +1,60 @@
+{
+	"configurations": [
+		{
+			"name": "Windows",
+			"includePath": [
+				"${workspaceFolder}/**"
+			],
+			"defines": [
+				"_DEBUG",
+				"UNICODE",
+				"_UNICODE"
+			],
+			"windowsSdkVersion": "10.0.26100.0",
+			"compilerPath": "~/scoop/apps/llvm/current/bin/clang",
+			"cStandard": "gnu17",
+			"cppStandard": "c++20",
+			"intelliSenseMode": "windows-clang-x64"
+		},
+		{
+			"name": "Mac",
+			"includePath": [
+				"${workspaceFolder}/**",
+				"/opt/homebrew/Cellar/libsodium/1.0.21/include",
+				"${workspaceFolder}/node-bindings/dst",
+				"~/.nvm/versions/node/**/include/node"
+			],
+			"defines": [],
+			"compilerPath": "/usr/bin/clang",
+			"cStandard": "c17",
+			"cppStandard": "c++20",
+			"intelliSenseMode": "macos-clang-arm64"
+		},
+		{
+			"name": "Linux",
+			"includePath": [
+				"${workspaceFolder}/include",
+				"/usr/include", "$HOME/.nvm/versions/node/*/include/node",
+				"/usr/include/node" /* One of the two */
+			],
+			"defines": [],
+			"compilerPath": "/usr/bin/clang",
+			"cStandard": "gnu17",
+			"cppStandard": "c++20",
+			"intelliSenseMode": "linux-clang-x64"
+		},
+		{
+			"name": "Linux (GCC)",
+			"includePath": [
+				"${workspaceFolder}/include",
+				"/usr/include"
+			],
+			"defines": [],
+			"compilerPath": "/usr/bin/gcc",
+			"cStandard": "gnu17",
+			"cppStandard": "c++20",
+			"intelliSenseMode": "linux-gcc-x64"
+		}
+	],
+	"version": 4
+}

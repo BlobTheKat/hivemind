@@ -1,0 +1,50 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "(lldb) Launch test",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/tmp/test.out",
+			"args": [],
+			"env": {
+				"ASAN_OPTIONS": "detect_leaks=0"
+			},
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "build"
+		},
+		{
+			"name": "(lldb) Launch test (tsan)",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/tmp/test.out",
+			"args": [],
+			"env": {
+				"ASAN_OPTIONS": "detect_leaks=0"
+			},
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "build (tsan)"
+		},
+		{
+			"name": "Profile",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/tmp/test.out",
+			"args": [], "noDebug": true,
+			"cwd": "${workspaceFolder}",
+			"preLaunchTask": "build for profiling"
+		},
+		{
+			"name": "(lldb) Launch js test",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${userHome}/.nvm/versions/node/v22.13.1/bin/node",
+			"args": ["node-bindings/example.js"],
+			"env": {
+				"ASAN_OPTIONS": "detect_leaks=0",
+				"DYLD_INSERT_LIBRARIES": "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/16/lib/darwin/libclang_rt.asan_osx_dynamic.dylib"
+			},
+			"cwd": "${workspaceFolder}",
+		}
+	]
+}

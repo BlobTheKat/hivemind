@@ -1,0 +1,56 @@
+{
+	"version": "2.0.0",
+	"tasks": [{
+		"label": "build",
+		"type": "shell",
+		"command": "clang",
+		"args": [
+			"-DHIVEMIND_NO_LOCAL_BYPASS", "-DNO_SOFT_ASSERT",
+			"-g", "-O0", "-mcx16", "-Wall", "-std=c11",
+			"-Wno-unused", "-Wno-unused-command-line-argument",
+			"-fno-omit-frame-pointer", "-pthread",
+			"-fsanitize=address,undefined", "-flto",
+			"${workspaceFolder}/tests/hivemind_test.c",
+			"${workspaceFolder}/hivemind_src/main.c",
+			"-o", "${workspaceFolder}/tmp/test.out",
+			"-I${workspaceFolder}/include"
+		],
+		"group": { "kind": "build", "isDefault": true }
+	},{
+		"label": "build (tsan)",
+		"type": "shell",
+		"command": "clang",
+		"args": [
+			"-DHIVEMIND_NO_LOCAL_BYPASS", "-DNO_SOFT_ASSERT",
+			"-g", "-O0", "-mcx16", "-Wall", "-std=c11",
+			"-Wno-unused", "-Wno-unused-command-line-argument",
+			"-fno-omit-frame-pointer", "-pthread",
+			"-fsanitize=thread", "-DTSAN", "-flto",
+			"${workspaceFolder}/tests/hivemind_test.c",
+			"${workspaceFolder}/hivemind_src/main.c",
+			"-o", "${workspaceFolder}/tmp/test.out",
+			"-I${workspaceFolder}/include"
+		],
+		"group": { "kind": "build", "isDefault": true }
+	},{
+		"label": "build for profiling",
+		"type": "shell",
+		"command": "clang",
+		"args": [
+			"-DHIVEMIND_NO_LOCAL_BYPASS", "-DNO_SOFT_ASSERT",
+			"-g", "-O3", "-mcx16", "-fno-omit-frame-pointer",
+			"-Wall", "-Wextra", "-Wpedantic",
+			"-Wformat=2", "-Wnull-dereference", "-Wconversion",
+			"-Wstrict-overflow=5", "-Warray-bounds", "-Werror",
+			"-Wno-unused", "-Wno-unused-command-line-argument",
+			"-Wno-gnu-zero-variadic-macro-arguments", "-Wno-gnu-binary-literal",
+			"-Wno-unused-parameter", "-Wno-strict-prototypes", "-Wno-newline-eof",
+			"-std=c11", "-march=native", "-pthread", "-flto",
+			"${workspaceFolder}/tests/hivemind_test.c",
+			"${workspaceFolder}/hivemind_src/main.c",
+			"-o", "${workspaceFolder}/tmp/test.out",
+			"-I${workspaceFolder}/include"
+		],
+		"group": { "kind": "build", "isDefault": true }
+	}]
+}

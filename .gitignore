@@ -1,0 +1,15 @@
+**/*.out
+**/*.dSYM
+**/.master.key
+tmp/**
+
+node-bindings/build/
+node-bindings/node_modules/
+node-bindings/package-lock.json
+node-bindings/yarn.lock
+node-bindings/dst
+node-bindings/*.node
+
+
+**/.DS_Store
+**/Thumbs.db
