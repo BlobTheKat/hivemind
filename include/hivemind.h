@@ -26,10 +26,10 @@ typedef struct{
 			// union{
 			// 	struct{  uint16_t port_le, mtu_le;  };
 			// 	uint32_t port_mtu_packed_le;
-			// 	uint8_t port_mtu_bytes[4];
+			// 	struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; };
 			// };
 			// ```
-			union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; uint8_t port_mtu_bytes[4]; };
+			union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; }; };
 
 			x_socket_t _handle;
 			// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.

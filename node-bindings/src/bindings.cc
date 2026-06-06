@@ -148,15 +148,15 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		auto portv = props.Get("selfPort");
 		if(portv.IsNumber()){
 			int port = portv.As<Napi::Number>().Uint32Value();
-			server_.port_mtu_bytes[0] = port;
-			server_.port_mtu_bytes[1] = port>>8;
+			server_.port_lo = port;
+			server_.port_hi = port>>8;
 		}
 		auto mtuv = props.Get("selfMtu");
 		if(mtuv.IsNumber()){
 			int mtu = mtuv.As<Napi::Number>().Uint32Value();
 			if(mtu > 65535) mtu = 65535;
-			server_.port_mtu_bytes[2] = mtu;
-			server_.port_mtu_bytes[3] = mtu>>8;
+			server_.mtu_lo = mtu;
+			server_.mtu_hi = mtu>>8;
 		}
 	}
 	Napi::Value listen(const Napi::CallbackInfo& info){
@@ -246,7 +246,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		enum ip_kind kind = ip_to_string(server_.addr, out);
 		auto ret = Napi::Object::New(info.Env());
 		ret.Set("address", Napi::String::New(info.Env(), out));
-		ret.Set("port", Napi::Number::New(info.Env(), server_.port_mtu_bytes[0]|server_.port_mtu_bytes[1]<<8));
+		ret.Set("port", Napi::Number::New(info.Env(), server_.port_lo|server_.port_hi<<8));
 		char family[] = "IPv6";
 		if(kind == IP_KIND_V4) family[3] = '4';
 		ret.Set("family", Napi::String::New(info.Env(), family));

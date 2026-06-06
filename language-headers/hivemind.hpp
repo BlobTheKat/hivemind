@@ -65,10 +65,10 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 	// If you would like to supply your own address, port, MTU or any combination of those to override the results from the reflection test, you can call `set_self()` before calling `start()`. If all three parameters are non-zero, the reflection test is skipped entirely.
 	void set_self(ip_addr_t addr, uint16_t port, uint16_t mtu = 0){
 		this->addr = addr;
-		this->port_mtu_bytes[0] = port & 0xFF;
-		this->port_mtu_bytes[1] = port >> 8;
-		this->port_mtu_bytes[2] = mtu & 0xFF;
-		this->port_mtu_bytes[3] = mtu >> 8;
+		this->port_lo = port & 0xFF;
+		this->port_hi = port >> 8;
+		this->mtu_lo = mtu & 0xFF;
+		this->mtu_hi = mtu >> 8;
 	}
 	// Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
 	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN, const char* filename = 0, PipeRestoreFn pipe_restore = 0){
