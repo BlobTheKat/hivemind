@@ -53,7 +53,7 @@
 	#define bswap_32(x) swap32(x)
 	#define bswap_64(x) swap64(x)
 #endif
-	#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	#if defined(_MSC_VER) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 		#define htole16(x) ((uint16_t)(x))
 		#define htole32(x) ((uint32_t)(x))
 		#define htole64(x) ((uint64_t)(x))

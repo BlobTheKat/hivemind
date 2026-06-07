@@ -34,22 +34,17 @@ void Poly1305(const uint8_t *in, size_t inlen, const uint8_t key[32], uint8_t ou
 
 #if defined(__INTELLISENSE__) || defined(CHACHA20_POLY1305_IMPL)
 
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-	#define _cc20_p1305_htole32(x) ((uint32_t)(x))
-	#define _cc20_p1305_le32toh(x) ((uint32_t)(x))
-#elif defined(_MSC_VER)
-	#include <stdlib.h>
-	#define _cc20_p1305_htole32(x) _byteswap_ulong(x)
-	#define _cc20_p1305_le32toh(x) _byteswap_ulong(x)
+#ifdef _MSC_VER
+	#define _CC20_P1305_ALWAYSINLINE __forceinline
 #else
-	#define _cc20_p1305_htole32(x) __builtin_bswap32(x)
-	#define _cc20_p1305_le32toh(x) __builtin_bswap32(x)
+	#define _CC20_P1305_ALWAYSINLINE __attribute__((always_inline))
 #endif
 
-#if defined(__cplusplus) && !defined(_Alignas)
-#define _Alignas alignas
+#if defined(_MSC_VER) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	#define _cc20_p1305_le32bswap(x) ((uint32_t)(x))
+#else
+	#define _cc20_p1305_le32bswap(x) __builtin_bswap32(x)
 #endif
-
 
 #if defined(__aarch64__) || defined(_M_ARM64) || defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -137,7 +132,7 @@ static inline void ChaCha20_block_xor__software(uint32_t in[16], uint8_t out[64]
 	}
 
 	for(int i = 0; i < 16; i++)
-		((uint32_t*)out)[i] ^= _cc20_p1305_htole32(state[i] + in[i]);
+		((uint32_t*)out)[i] ^= _cc20_p1305_le32bswap(state[i] + in[i]);
 
 	if(--n){ in[12]++; out += 64; goto start; }
 }
@@ -157,20 +152,19 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 	}
 
 	for(int i = 0; i < 16; i++)
-		io[i] = _cc20_p1305_htole32(state[i] + io[i]);
+		io[i] = _cc20_p1305_le32bswap(state[i] + io[i]);
 }
 #if defined(__riscv)
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin)
 #if __has_builtin(__builtin_cpu_supports)
-	#define CPB_ALWAYSINLINE __attribute__((always_inline))
-	#define CPB_SIMD __attribute__((target("arch=+v"))) static
+	#define _CC20_P1305_SIMD __attribute__((target("arch=+v"))) static
 	#define _cc20_p1305_CHACHA20_ROUND(a, b, c, d, vl) \
 		a = __riscv_vadd_vv_u32m1(a, b, vl); d = __riscv_vxor_vv_u32m1(d, a, vl); d = __riscv_vror_vi_u32m1(d, 16, vl); \
 		c = __riscv_vadd_vv_u32m1(c, d, vl); b = __riscv_vxor_vv_u32m1(b, c, vl); b = __riscv_vror_vi_u32m1(b, 20, vl); \
 		a = __riscv_vadd_vv_u32m1(a, b, vl); d = __riscv_vxor_vv_u32m1(d, a, vl); d = __riscv_vror_vi_u32m1(d, 24, vl); \
 		c = __riscv_vadd_vv_u32m1(c, d, vl); b = __riscv_vxor_vv_u32m1(b, c, vl); b = __riscv_vror_vi_u32m1(b, 25, vl);
 
-	CPB_SIMD void ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n) {
+	_CC20_P1305_SIMD void ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n) {
 		size_t vl = __riscv_vsetvl_e32m1(4);
 		vuint32m1_t idx_rot1 = __riscv_vle32_v_u32m1((const uint32_t[4]){1, 2, 3, 0}, vl);
 		vuint32m1_t idx_rot2 = __riscv_vle32_v_u32m1((const uint32_t[4]){2, 3, 0, 1}, vl);
@@ -205,7 +199,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 
 		if(--n){ in[12]++; out += 64; goto start; }
 	}
-	CPB_SIMD void ChaCha20_block__simd(uint32_t io[16]) {
+	_CC20_P1305_SIMD void ChaCha20_block__simd(uint32_t io[16]) {
 		size_t vl = __riscv_vsetvl_e32m1(4);
 		vuint32m1_t idx_rot1 = __riscv_vle32_v_u32m1((const uint32_t[4]){1, 2, 3, 0}, vl);
 		vuint32m1_t idx_rot2 = __riscv_vle32_v_u32m1((const uint32_t[4]){2, 3, 0, 1}, vl);
@@ -235,8 +229,8 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 
 	extern static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
 	extern static void (*ChaCha20_block__impl)(uint32_t[16]);
-	CPB_ALWAYSINLINE static void simd_decide(){
-		bool supports = __builtin_cpu_supports("v") && __builtin_cpu_supports("zvkb");
+	_CC20_P1305_ALWAYSINLINE static void _cc20_p1305_simd_decide(){
+		int supports = __builtin_cpu_supports("v") > 0 && __builtin_cpu_supports("zvkb") > 0;
 		ChaCha20_block_xor__impl = supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software;
 		ChaCha20_block__impl = supports ? ChaCha20_block__simd : ChaCha20_block__software;
 	}
@@ -249,11 +243,9 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 #endif
 #elif (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)) && (defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86))
 	#ifdef _MSC_VER
-		#define CPB_SIMD static
-		#define CPB_ALWAYSINLINE __forceinline
+		#define _CC20_P1305_SIMD static
 	#else
-		#define CPB_SIMD __attribute__((target("ssse3"))) static
-		#define CPB_ALWAYSINLINE __attribute__((always_inline))
+		#define _CC20_P1305_SIMD __attribute__((target("ssse3"))) static
 	#endif
 
 	#define _cc20_p1305_CHACHA20_ROUND(a, b, c, d) do { \
@@ -262,7 +254,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
     a = _mm_add_epi32(a, b); d = _mm_xor_si128(d, a); d = _mm_shuffle_epi8(d, rot8); \
     c = _mm_add_epi32(c, d); b = _mm_xor_si128(b, c); b = _mm_xor_si128(_mm_slli_epi32(b, 7), _mm_srli_epi32(b, 25)); \
 } while(0)
-	CPB_SIMD ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n){
+	_CC20_P1305_SIMD ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n){
 		const __m128i rot16 = _mm_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
 		const __m128i rot8  = _mm_set_epi8(14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3);
 
@@ -293,7 +285,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		_mm_storeu_si128((__m128i*)(out + 48), _mm_xor_si128(d, _mm_loadu_si128((const __m128i*)(out + 48))));
 		if(--n){ in[12]++; out += 64; goto start; }
 	}
-	CPB_SIMD ChaCha20_block__simd(uint32_t io[16]){
+	_CC20_P1305_SIMD ChaCha20_block__simd(uint32_t io[16]){
 		const __m128i rot16 = _mm_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
 		const __m128i rot8  = _mm_set_epi8(14, 13, 12, 15, 10, 9, 8, 11, 6, 5, 4, 7, 2, 1, 0, 3);
 
@@ -320,44 +312,43 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 	}
 	extern static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
 	extern static void (*ChaCha20_block__impl)(uint32_t[16]);
-	CPB_ALWAYSINLINE static void simd_decide(){		
+	_CC20_P1305_ALWAYSINLINE static void _cc20_p1305_simd_decide(){		
 #ifdef _MSC_VER
 		int cpuInfo[4];
 		__cpuid(cpuInfo, 1);
-		bool supports = (cpuInfo[2] & (1 << 9)) != 0;
+		int supports = (cpuInfo[2] & (1 << 9));
 #else
-		__builtin_cpu_init();
-      bool supports = __builtin_cpu_supports("ssse3") > 0;
+      int supports = __builtin_cpu_supports("ssse3") > 0;
 #endif
 		ChaCha20_block_xor__impl = supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software;
 		ChaCha20_block__impl = supports ? ChaCha20_block__simd : ChaCha20_block__software;
 	}
 #else
-	void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__software(io); }
-	void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(in, out, n); }
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__software(io); }
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(in, out, n); }
 #endif
-#ifdef CPB_SIMD
+#ifdef _CC20_P1305_SIMD
 	static void ChaCha20_block_xor__decide(uint32_t in[16], uint8_t out[64], uint32_t n){
-		simd_decide(); ChaCha20_block_xor__impl(in, out, n);
+		_cc20_p1305_simd_decide(); ChaCha20_block_xor__impl(in, out, n);
 	}
 	static void ChaCha20_block__decide(uint32_t io[16]){
-		simd_decide(); ChaCha20_block__impl(io);
+		_cc20_p1305_simd_decide(); ChaCha20_block__impl(io);
 	}
 	static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t) = ChaCha20_block_xor__decide;
 	static void (*ChaCha20_block__impl)(uint32_t[16]) = ChaCha20_block__decide;
-	CPB_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__impl(in, out, n); }
-	CPB_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(io); }
-	#undef CPB_ALWAYSINLINE
-	#undef CPB_SIMD
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__impl(in, out, n); }
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(io); }
+	#undef _CC20_P1305_SIMD
 #endif
+#undef _CC20_P1305_ALWAYSINLINE
 
 #endif
 #undef _cc20_p1305_CHACHA20_ROUND
 
-#define _cc20_p1305_POLY1305_LOAD(m0,m1,m2,m3,m4,buf) m0 = _cc20_p1305_le32toh(((uint32_t*)buf)[0]); \
-	m1 = _cc20_p1305_le32toh(((uint32_t*)buf)[1]); \
-	m2 = _cc20_p1305_le32toh(((uint32_t*)buf)[2]); \
-	m3 = _cc20_p1305_le32toh(((uint32_t*)buf)[3]); \
+#define _cc20_p1305_POLY1305_LOAD(m0,m1,m2,m3,m4,buf) m0 = _cc20_p1305_le32bswap(((uint32_t*)buf)[0]); \
+	m1 = _cc20_p1305_le32bswap(((uint32_t*)buf)[1]); \
+	m2 = _cc20_p1305_le32bswap(((uint32_t*)buf)[2]); \
+	m3 = _cc20_p1305_le32bswap(((uint32_t*)buf)[3]); \
 	m4 |= m3 >> 8; \
 	m3 = (m2 >> 14 | m3 << 18) & 0x3ffffff; \
 	m2 = (m1 >> 20 | m2 << 12) & 0x3ffffff; \
@@ -384,7 +375,11 @@ void Poly1305(const uint8_t *in, size_t inlen, const uint8_t key[32], uint8_t ou
 		uint32_t c;
 		
 		int block = 16;
+#ifdef __cplusplus
+		alignas(4) char buf[16] = {0};
+#else
 		_Alignas(4) char buf[16] = {0};
+#endif
 		if(inlen < 16){
 			buf[block = (int)inlen] = 1;
 		}else m4 = 0x1000000;
@@ -437,19 +432,19 @@ void Poly1305(const uint8_t *in, size_t inlen, const uint8_t key[32], uint8_t ou
 	h4 = (h4 & ~mask) | (g4 & mask);
 
 	// serialize h
-	uint64_t f0 = (uint64_t)((h0      ) | (h1 << 26)) + _cc20_p1305_le32toh(((uint32_t*)key)[4]);
-	uint64_t f1 = (uint64_t)((h1 >> 6 ) | (h2 << 20)) + _cc20_p1305_le32toh(((uint32_t*)key)[5]) + (f0 >> 32);
-	uint64_t f2 = (uint64_t)((h2 >> 12) | (h3 << 14)) + _cc20_p1305_le32toh(((uint32_t*)key)[6]) + (f1 >> 32);
-	uint64_t f3 = (uint64_t)((h3 >> 18) | (h4 << 8 )) + _cc20_p1305_le32toh(((uint32_t*)key)[7]) + (f2 >> 32);
+	uint64_t f0 = (uint64_t)((h0      ) | (h1 << 26)) + _cc20_p1305_le32bswap(((uint32_t*)key)[4]);
+	uint64_t f1 = (uint64_t)((h1 >> 6 ) | (h2 << 20)) + _cc20_p1305_le32bswap(((uint32_t*)key)[5]) + (f0 >> 32);
+	uint64_t f2 = (uint64_t)((h2 >> 12) | (h3 << 14)) + _cc20_p1305_le32bswap(((uint32_t*)key)[6]) + (f1 >> 32);
+	uint64_t f3 = (uint64_t)((h3 >> 18) | (h4 << 8 )) + _cc20_p1305_le32bswap(((uint32_t*)key)[7]) + (f2 >> 32);
 
-	((uint32_t*)out)[0] = _cc20_p1305_htole32(f0);
-	((uint32_t*)out)[1] = _cc20_p1305_htole32(f1);
-	((uint32_t*)out)[2] = _cc20_p1305_htole32(f2);
-	((uint32_t*)out)[3] = _cc20_p1305_htole32(f3);
+	((uint32_t*)out)[0] = _cc20_p1305_le32bswap(f0);
+	((uint32_t*)out)[1] = _cc20_p1305_le32bswap(f1);
+	((uint32_t*)out)[2] = _cc20_p1305_le32bswap(f2);
+	((uint32_t*)out)[3] = _cc20_p1305_le32bswap(f3);
 }
 
 #undef _cc20_p1305_POLY1305_LOAD
-#undef _cc20_p1305_htole32
-#undef _cc20_p1305_le32toh
+#undef _cc20_p1305_le32bswap
+#undef _cc20_p1305_le32bswap
 
 #endif
