@@ -163,8 +163,6 @@ static void _drain_writes(struct _hivemind_remote* state, uint64_t now, bool byp
 	if(sent < sendable_now){
 		uint32_t chacha_in[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
 		if(!bypass) memcpy(chacha_in+4, state->send_key, 32);
-		size_t df = (ring_buffer_size(&state->send_queue)-state->unsent_i) / sizeof(struct _send_packet*);
-		uint64_t seq_lo = state->send_seq_lo - df; uint32_t seq_hi = state->send_seq_hi - (seq_lo > state->send_seq_lo);
 		ring_iterator_t it = ring_buffer_iterator(&state->send_queue, state->unsent_i, -1ull);
 		do{
 			if unlikely(state->unsent_i >= 0x7FFFFF00*sizeof(struct _send_packet*)) break;
@@ -178,25 +176,22 @@ static void _drain_writes(struct _hivemind_remote* state, uint64_t now, bool byp
 			ring_iterator_next(&it, &packet, sizeof(packet), true);
 			if(!packet) goto end;
 			if(bypass){
-				uint64_t crcinit;
+				uint64_t crcinit, crc;
 				if(!(packet->len_p&1)){
 					// kEX
 					crcinit = state->send_crcinit = _alloc_id_short(state->server);
+					crc = crc64(crcinit, packet->payload, lenof(packet));
 					*(uint32_t*)(packet->payload+8) = htole32(crcinit); *(uint32_t*)(packet->payload+12) = htole32(crcinit>>32);
-				}else crcinit = state->send_crcinit;
-				uint64_t crc = crc64(crcinit, packet->payload, packet->len_p<<2);
+				}else{
+					crcinit = state->send_crcinit;
+					crc = crc64(crcinit, packet->payload, lenof(packet));
+				}
 				*(uint32_t*)packet->payload = htole32(crc); *(uint32_t*)(packet->payload+4) = htole32(crc>>32);
-			}else{
-				chacha_in[13] = (uint32_t)seq_lo;
-				chacha_in[14] = (uint32_t)(seq_lo>>32);
-				chacha_in[15] = seq_hi;
-				encrypt_packet(chacha_in, packet);
-			}
+			}else encrypt_packet(chacha_in, packet);
 			sent += _hivemind_send_packet(state, packet, now, state->unsent_i);
 			if(!state->send_order_start) state->send_order_start = packet;
 			state->unsent_i += sizeof(struct _send_packet*);
 			//if(DEBUG) check_send(state);
-			if(!++seq_lo) seq_hi++;
 		}while(sent < sendable_now);
 	}
 	state->send_window += (uint64_t)((double)sent*(double)state->us_per_byte);
@@ -349,8 +344,6 @@ static void _queue_ack(struct _hivemind_remote* state, uint64_t lo, uint32_t hi,
 		if(bypass){
 			uint8_t packet[72];
 			*(uint32_t*)packet = htole32(hi); *(uint32_t*)(packet+4) = htole32(lo>>32);
-			uint64_t crc = crc64(state->recv_crcinit, packet, 8+(i<<2));
-			*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
 			//printf("acking [%u,%llu]+%u\n", hi, lo, i-1);
 			uint32_t* pl = (uint32_t*)(packet+8);
 			pl[0] = htole32(lo);
@@ -359,6 +352,8 @@ static void _queue_ack(struct _hivemind_remote* state, uint64_t lo, uint32_t hi,
 					pl[j] = htole32(state->ack_coal_buf[j-1]);
 				if(i&1) pl[i++] = 0;
 			}
+			uint64_t crc = crc64(state->recv_crcinit, packet, 8+(i<<2));
+			*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
 			bool send_success = x_udp_send(state->handle, (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 8+(i<<2));
 			soft_assert(send_success);
 		}else{
@@ -666,11 +661,10 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 			if(plen < 12) continue;
 			uint64_t crc = (uint64_t)le32toh(*(uint32_t*)packet)|(uint64_t)le32toh(*(uint32_t*)(packet+4))<<32;
 			uint32_t seq = le32toh(*(uint32_t*)(packet+8));
-			if(!(plen&4) && plen < 76){
+			if(plen < 76 && (!(plen&4) || plen==12)){
 				// ack
 				if likely(plen == 12 || packet[12]){
 					struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, false);
-					if(plen > 12 && !packet[plen-4]) plen -= 4;
 					_time_lock_acq(&state->send_last_used);
 					uint64_t tim = _hivemind_internal_clock();
 					shared_lock_release(&s->state_lock);
@@ -678,18 +672,19 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 					size_t sz = ring_buffer_size(&state->send_queue);
 					uint64_t lo2 = lo0 - sz/sizeof(struct _send_packet**);
 					if(lo2>lo0){ hi--; }; lo0 = lo2;
-					_resolve_seq(&lo0, &hi, le32toh(*(uint32_t*)(packet+16)));
-
+					_resolve_seq(&lo0, &hi, seq);
 					size_t i0 = (lo0 - lo2) * sizeof(struct _send_packet**);
 					lo2 += state->unsent_i/sizeof(struct _send_packet**);
 					if(i0 >= state->unsent_i+(128*sizeof(struct _send_packet**))) continue;
 					//printf("ack'd [%u,%llu]", hi, lo0);
 					*(uint32_t*)(packet+4) = htole32(lo0>>32);
 					*(uint32_t*)packet = htole32(hi);
+					if(plen > 12 && !packet[plen-4]) plen -= 4;
 					if(crc64(state->recv_crcinit, packet, plen) == crc) _ackd(state, packet, plen, tim, lo0, lo2, hi, i0, true);
 					_time_lock_rel(&state->send_last_used, tim);
 					continue;
 				}
+				if(plen < 24) continue;
 				uint32_t opts = le32toh(*(uint32_t*)(packet+12))>>8;
 				uint64_t crcinit = (uint64_t)le32toh(*(uint32_t*)(packet+8)) | (uint64_t)le32toh(*(uint32_t*)(packet+16))<<32;
 				uint64_t t = epoch_now()/MILLISECOND_US, t1 = crcinit>>8;
@@ -729,7 +724,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 				}else shared_lock_release(&s->state_lock);
 				continue;
 			}
-			unsigned header = 16-(plen&7); plen -= header;
+			unsigned header = 16-(plen&7);
 			uint64_t crcinit = 0;
 			if unlikely(header == 16){
 				// New connection requested
@@ -781,7 +776,6 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 			l = _time_lock_acq(&state->recv_last_used);
 			state->recv_unlocked_ref--;
 			if unlikely(header == 16){
-				//printf("%llu\n", kdw);
 				uint64_t kdw = crcinit>>8;
 				uint32_t last[5];
 				_nalloc_id(s, last);
@@ -822,7 +816,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 				size_t sz = ring_buffer_size(&state->send_queue);
 				uint64_t lo2 = lo0 - sz/sizeof(struct _send_packet**);
 				if(lo2>lo0){ hi--; }; lo0 = lo2;
-				_resolve_seq(&lo0, &hi, le32toh(*(uint32_t*)(packet+16)));
+				_resolve_seq(&lo0, &hi, seq);
 
 				size_t i0 = (lo0 - lo2) * sizeof(struct _send_packet**);
 				lo2 += state->unsent_i/sizeof(struct _send_packet**);

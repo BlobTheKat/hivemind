@@ -327,17 +327,20 @@ static size_t read_len_inc(const uint8_t* payload){
 	return len;
 }
 
-static void encrypt_packet(uint32_t state[16], struct _send_packet* p){
+static void encrypt_packet(uint32_t chacha[16], struct _send_packet* p){
 	uint8_t* pl = p->payload+20;
-	state[12] = 0;
+	chacha[12] = 0;
+	chacha[13] = le32toh(*(uint32_t*)(p->payload+16));
+	chacha[14] = le32toh(*(uint32_t*)(p->payload+4));
+	chacha[15] = le32toh(*(uint32_t*)p->payload);
 	if(p->len_p&8){
 		pl += 16;
 		uint32_t pipeid[5];
 		memcpy(pipeid, pl, 20);
-		ChaCha20_block_xor(state, pl, p->len_p>>4);
+		ChaCha20_block_xor(chacha, pl, p->len_p>>4);
 		memcpy(pl, pipeid, 20);
-	}else ChaCha20_block_xor(state, pl, p->len_p>>4);
-	uint32_t d[16]; memcpy(d, state, 64);
+	}else ChaCha20_block_xor(chacha, pl, p->len_p>>4);
+	uint32_t d[16]; memcpy(d, chacha, 64);
 	// RFC 7539 § 2.3-2.4 recommends using in[12] ==0 for AEAD, >0 for payload, and in[13-15] for nonce
 	// One slight change is we use in[12] ==2^32-1 for AEAD and 0..<2^32-1 for payload. This is a stylistic choice
 	// and has no effect on the quality of the resulting keystream. Individual UDP packets will never be able to surpass block counter > 1024

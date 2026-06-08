@@ -129,7 +129,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 #endif
 	unsigned port = le16toh(to->port_le), mtu = le16toh(to->mtu_le), omtu;
 	size_t pad_len = len + (len > 32767 ? 26 : 20), num_packets = 1;
-	uint64_t seq_lo;
+	uint64_t seq_lo; uint32_t seq_hi;
 	struct _hivemind_remote* state = _hivemind_state_find(s, to->addr, (uint16_t)port, true);
 	if(state->server_mtu < mtu) mtu = state->server_mtu;
 	bool bypass = addr_compare(&to->addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
@@ -158,7 +158,6 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	state->send_unlocked_ref++;
 	struct _send_packet* packet = 0; unsigned plen = 0;
 	/* critical section */
-	
 	if unlikely(l == 1 || (tim-l) > s->state_lifetime){
 		if unlikely(ring_buffer_size(&state->send_queue)) _hivemind_remote_cleanup_send(state);
 		if(bypass){
@@ -167,9 +166,10 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 			plen = pad_len > (size_t)omtu ? omtu : pad_len < 60 ? 60 : (unsigned)pad_len;
 			packet = (struct _send_packet*) _hivemind_alloc(sizeof(struct _send_packet) + 16 + plen);
 			uint64_t shash = _mix64_addr(s->addr, le16toh(s->port_le)), dhash = _mix64_addr(to->addr, le16toh(to->port_le));
-			*(uint32_t*)packet = htole32(shash); *(uint32_t*)(packet+4) = htole32(shash>>32);
-			*(uint32_t*)(packet+8) = htole32(dhash); *(uint32_t*)(packet+16) = htole32(dhash>>32);
+			*(uint32_t*)packet->payload = htole32(shash); *(uint32_t*)(packet->payload+4) = htole32(shash>>32);
+			*(uint32_t*)(packet->payload+8) = htole32(dhash); *(uint32_t*)(packet->payload+12) = htole32(dhash>>32);
 			// crcinit is decided deferred (when sent)
+			memcpy(packet->payload+16, to->id, 20);
 		}else{
 			num_packets += (omtu-mtu)<16 && (num_packets*mtu-pad_len)<64;
 			omtu = (omtu-16)&-64u;
@@ -179,8 +179,8 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		}
 		state->send_seq_hi = state->send_seq_lo = 0;
 	}
-	seq_lo = state->send_seq_lo;
-	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi++;
+	seq_lo = state->send_seq_lo; seq_hi = state->send_seq_hi;
+	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi = seq_hi+1;
 	if(state->unsent_i == ring_buffer_size(&state->send_queue)){
 		state->rtt_gate_hi = 0;
 		state->rtt_gate_lo = 8;
@@ -193,7 +193,9 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		plen = (pad_len > (size_t)mtu) ? mtu : (unsigned)pad_len;
 		packet = (struct _send_packet*) _hivemind_alloc(sizeof(struct _send_packet) + header + plen);
 		*(uint32_t*)(packet->payload+(bypass?8:16)) = htole32(seq_lo);
-		memcpy(packet->payload+20, to->id, 20);
+		*(uint32_t*)packet->payload = htole32(seq_hi);
+		*(uint32_t*)(packet->payload+4) = htole32(seq_lo>>32);
+		memcpy(packet->payload+header, to->id, 20);
 	}else header = bypass?16:36;
 	uint8_t* p = packet->payload + header;
 	unsigned j = 20;
@@ -223,6 +225,8 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		packet->first = packet->resent = 0;
 		p = packet->payload + header;
 		*(uint32_t*)(packet->payload+(bypass?8:16)) = htole32(seq_lo);
+		*(uint32_t*)packet->payload = htole32(seq_hi);
+		*(uint32_t*)(packet->payload+4) = htole32(seq_lo>>32);
 		if(pad_len <= plen){
 			// last packet
 			memset(p + len, 0, plen - len);
@@ -238,7 +242,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 #if SIZE_MAX == UINT64_MAX
 	packet->seq_m = seq_lo>>32;
 #endif
-	seq_lo++;
+	if(!++seq_lo) seq_hi++;
 	*ppackets++ = packet;
 	if(pad_len) goto more;
 	assert((size_t)(ppackets - packets) == num_packets);
