@@ -542,11 +542,11 @@ static x_socket_t x_udp_auto(){
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 #endif
-	if(fd < 0) return X_FILE_INVALID;
+	if(fd < 0) return X_SOCKET_INVALID;
 	uint32_t off = 0;
 	if(setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, 4) < 0){
 		close(fd);
-		fd = X_FILE_INVALID;
+		fd = X_SOCKET_INVALID;
 	}
 	return fd;
 }

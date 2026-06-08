@@ -137,12 +137,28 @@ _CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len
 	}
 	#undef _CRC64_RISCV
 #else
+#ifdef __linux__
 	#include <sys/auxv.h>
 	#include <asm/hwcap.h>
 	static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = (getauxval(AT_HWCAP) & HWCAP_PMULL)
 #ifdef HWCAP2_PMULL
 			|| (getauxval(AT_HWCAP2) & HWCAP2_PMULL)
+#endif
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+	#include <sys/sysctl.h>
+	static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+		int v = 0; size_t sz = sizeof(v);
+		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = sysctlbyname("hw.optional.arm.FEAT_PMULL", &v, &sz, 0, 0) == 0 && v != 0
+#else
+	static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) =
+#ifdef __ARM_FEATURE_CRYPTO
+		__ARM_FEATURE_CRYPTO
+#else
+#warning "Building on an OS with no reliable run-time detection of PMULL arm extension. If this extension is indeed available, compile with arm crypto extension enabled (-march=...+crypto) or define -D__ARM_FEATURE_CRYPTO=1"
+		0
+#endif
 #endif
 			? crc64__simd : crc64__software;
 		atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
