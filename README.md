@@ -51,7 +51,7 @@ int main(){
 	hivemind_start(&h_server, (remote_t){
 		.addr = {0} /* [::] aka anywhere */, .port = 3331,
 		.mtu = 0 /* unused */, .interface = 0 /* auto */,
-	}, /*for address discovery*/ HIVEMIND_WAN, /*state restoration*/ NULL, NULL);
+	}, /*for address discovery*/ HIVEMIND_WAN_V4, /*state restoration*/ NULL, NULL);
 
 	hivemind_pipe_t pipe;
 	// The pipe type is contiguous, trivially copyable and has a platform-independent binary representation.

@@ -46,6 +46,10 @@ static inline uint64_t _mix64(uint64_t x){
 	return x;
 }
 
+static inline uint64_t _mix64_addr(ip_addr_t addr, uint16_t port){
+	return _mix64(((uint64_t)addr.dwords[0]<<32|addr.dwords[1]) ^ _mix64((uint64_t)addr.dwords[2]<<32|addr.dwords[3]) ^ (port * 0x9e3779b97f4a7c15ull));
+}
+
 struct _send_packet{
 	struct _send_packet* next;
 #if SIZE_MAX == UINT64_MAX
@@ -90,7 +94,7 @@ struct _hivemind_remote{
 		};
 	};
 
-	uint32_t send_key[8]; // Derived local key for outgoing
+	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
 
 	// == 2nd-4th cache line: frequently written by recv logic ==
 
@@ -113,7 +117,7 @@ struct _hivemind_remote{
 	// Key derivation timestamp to thwart replay attacks. Forgotten after state cutoff (all key derivations older than that window are rejected regardless)
 	uint64_t key_derived_when;
 	// Derived local key for incoming packets (and to sign ACKs)
-	uint32_t recv_key[8];
+	union{ uint32_t recv_key[8]; uint64_t recv_crcinit; };
 
 	// ACK coalescing stuff
 	// Linked list of all remotes with unsent acks
@@ -197,10 +201,8 @@ struct hivemind_server_t{
 		};
 		uint32_t dwords[5];
 	};
-	uint8_t buckets_exp, pipes_bucket_exp;
-#ifndef __SIZEOF_INT128__
-	atomic_flag _id_lock;
-#endif
+	uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
+	uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 	void* udata;
 	uint64_t state_lifetime;
 	uint32_t master_key[8];
@@ -214,7 +216,9 @@ struct hivemind_server_t{
 		struct{ uint64_t _id_hi, _id_lo; };
 		char _rand_bytes[16];
 	};
+	atomic_flag _id_lock;
 #endif
+	uint8_t buckets_exp, pipes_bucket_exp;
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
 	struct _hivemind_remote** remote_buckets;
@@ -244,6 +248,12 @@ static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	out[2] = htole32(v>>64); out[3] = htole32(v>>32);
 	out[4] = htole32(v);
 }
+static inline uint64_t _alloc_id_short(hivemind_server_t* s){
+	uint64_t t = epoch_now()/MILLISECOND_US;
+	uint8_t spin = 32;
+	uint64_t lo = (uint64_t)atomic_fetch_add_explicit(&s->_id, 1, memory_order_relaxed);
+	return t<<8|(lo&0xFF);
+}
 #else
 #warning No 16-byte atomic primitive detected. If they are available, consider compiling with appropriate flags, e.g -mcx16. Falling back to lock-based approach
 static void _alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
@@ -256,7 +266,7 @@ static void _alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
 	out[4] = htole32(lo);
 }
 static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
-	uint64_t t = _hivemind_internal_clock();
+	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint8_t spin = 32;
 	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
 	uint64_t lo = s->_id_lo, hi = s->_id_hi;
@@ -265,13 +275,21 @@ static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	out[2] = htole32(hi); out[3] = htole32(lo>>32);
 	out[4] = htole32(lo);
 }
+static inline uint64_t _alloc_id_short(hivemind_server_t* s){
+	uint64_t t = epoch_now()/MILLISECOND_US;
+	uint8_t spin = 32;
+	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
+	uint64_t lo = s->_id_lo++; if(lo == -1ull) s->_id_hi++;
+	atomic_flag_clear_explicit(&s->_id_lock, memory_order_release);
+	return t<<8|(lo&0xFF);
+}
 #endif
 
 // Time-carrying lock. These locks are used both to protect a resource and signal when it was last used (for GC). States are:
 // 0 = locked
 // 1 = uninitialized (serves as a sentinel value for "never used before")
 // >1 = unlocked and contains the time of last use. The time is updated on most lock releases (but not all, e.g if the lock was acquired but the resource wasn't "touched")
-static uint64_t _time_lock_acq(atomic(uint64_t)* ptr){
+static inline uint64_t _time_lock_acq(atomic(uint64_t)* ptr){
 	uint64_t l;
 	for(;;){
 		l = atomic_exchange_explicit(ptr, 0, memory_order_acquire);
@@ -280,7 +298,7 @@ static uint64_t _time_lock_acq(atomic(uint64_t)* ptr){
 	}
 }
 // Peek at the value of a time lock without acquiring it. See `_time_lock_acq`
-static uint64_t _time_lock_peek(atomic(uint64_t)* ptr){
+static inline uint64_t _time_lock_peek(atomic(uint64_t)* ptr){
 	uint64_t l;
 	for(;;){
 		l = atomic_load_explicit(ptr, memory_order_acquire);
@@ -289,8 +307,20 @@ static uint64_t _time_lock_peek(atomic(uint64_t)* ptr){
 	}
 }
 // Release a time lock and set the last used time. See `_time_lock_acq`
-static void _time_lock_rel(atomic(uint64_t)* ptr, uint64_t l){
+static inline void _time_lock_rel(atomic(uint64_t)* ptr, uint64_t l){
 	atomic_store_explicit(ptr, l, memory_order_release);
+}
+
+static void _time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
+	uint64_t l = _time_lock_acq(ptr);
+	if(!*ref) return;
+	*ref |= 0x80000000;
+	retry:
+	_time_lock_rel(ptr, l);
+	thread_sleep(1); // Very strong yield
+	_time_lock_acq(ptr);
+	if(*ref & 0x7FFFFFFF) goto retry;
+	*ref = 0;
 }
 
 typedef union{

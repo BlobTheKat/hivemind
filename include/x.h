@@ -163,8 +163,21 @@ static void* x_mapfile(x_file_t fd, uint64_t off, size_t sz, bool copy);
 // Allocate `sz` pages (`sz * X_PAGE_SIZE` bytes) of memory, with all bytes initially set to 0
 static void* x_pagealloc(size_t sz);
 
-// Free memory returned by x_pagealloc() or x_mapfile(). `sz` must exactly match the size of the allocation/mapping. Freeing only part of an allocation/mapping is not allowed.
+// Free memory returned by x_pagealloc() or x_mapfile(). `sz` must exactly match the size of the allocation/mapping. Freeing only part of an allocation/mapping is undefined behavior.
 static void x_pagefree(void* ptr, size_t sz);
+
+// Touch a page range. This hints to the OS to bring the pages into cache if they aren't already
+// This function works on all kinds of memory, including memory returned by `x_pagealloc`, `x_mapfile`, or any other external source.
+// `where` must be page-aligned and `sz` is measured in pages (`sz * X_PAGE_SIZE` bytes)
+static void x_touch_pages(void* where, size_t sz);
+
+// Invalidate a page range. After this call, the contents of any individual cache line within the invalidated region is either the last written value, or zero for pages returned by `x_pagealloc`-pages, or the contents of the underlying file at that region for `x_mapfile`-pages
+// `where` must be page-aligned and `sz` is measured in pages (`sz * X_PAGE_SIZE` bytes)
+static void x_invalidate_pages(void* where, size_t sz);
+
+// Synchronize a page range. After this call, all contents of these pages have been copied back to the underlying file
+// `where` must be page-aligned and `sz` is measured in pages (`sz * X_PAGE_SIZE` bytes)
+static void x_sync_pages(void* where, size_t sz);
 
 // Check if a file exists and get metadata
 static x_stat_t x_stat(const char* name);
@@ -325,6 +338,19 @@ static void x_pagefree(void* ptr, size_t sz){
 	VirtualFree(ptr, 0, MEM_RELEASE) || UnmapViewOfFile(ptr);
 }
 
+static void x_touch_pages(void* where, size_t sz){
+	WIN32_MEMORY_RANGE_ENTRY data[1] = {.VirtualAddress = where, .NumberOfBytes = sz<<16};
+	PrefetchVirtualMemory(GetCurrentProcess(), 1, data, 0);
+}
+
+static void x_invalidate_pages(void* where, size_t sz){
+	DiscardVirtualMemory(where, sz<<16);
+}
+
+static void x_sync_pages(void* where, size_t sz){
+	FlushViewOfFile(where, sz<<16);
+}
+
 static x_stat_t x_stat(const char* name){
 	x_stat_t ret;
 	WIN32_FILE_ATTRIBUTE_DATA fad;
@@ -442,6 +468,18 @@ static void* x_pagealloc(size_t sz){
 
 static void x_pagefree(void* ptr, size_t sz){
 	munmap(ptr, sz<<16);
+}
+
+static void x_touch_pages(void* where, size_t sz){
+	madvise(where, sz<<16, MADV_WILLNEED);
+}
+
+static void x_invalidate_pages(void* where, size_t sz){
+	madvise(where, sz<<16, MADV_DONTNEED);
+}
+
+static void x_sync_pages(void* where, size_t sz){
+	msync(where, sz<<16, MS_ASYNC);
 }
 
 static x_stat_t x_stat(const char* name){

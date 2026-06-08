@@ -171,7 +171,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		}
 		remote_t r;
 		r.port = (uint16_t) info[0].As<Napi::Number>().Uint32Value();
-		ip_addr_t test = HIVEMIND_WAN;
+		ip_addr_t test = HIVEMIND_WAN_V4;
 		if(argc >= 2){
 			if(info[1].IsString()){
 				char str[IP_STR_MAX_LEN];

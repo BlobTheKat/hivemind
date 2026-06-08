@@ -31,7 +31,21 @@ typedef struct{
 			// ```
 			union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; }; };
 
-			x_socket_t _handle;
+			// Encryption bypass allows hivemind to avoid encrypting traffic within an internal network, saving both CPU and a small amount of bandwidth.
+			// To prevent data corruption, accidental replays, etc..., a checksum is still enforced for every packet (specifically, CRC64) as well as other policies similar to encrypted traffic, the main difference being that these policies are only designed to avoid accidental mishaps. A malicious actor with access to your internal network can cause a lot more issues than just that of confidentiality (e.g Denial of service, Message/ack forgery, etc...)
+			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port.
+			// The default is /128 for IPv6 (Match IP but port can differ) and /32 for IPv4 (ditto), effectively enabling encryption bypass for traffic to the same machine
+			// This setting should be identical between servers that expect to use encryption bypass. Using different settings may lead to one server rejecting packets sent by another, either because received traffic is expected to be encrypted but isn't, or vice versa.
+			// See also: `network_bypass_prefix_v6`, `network_bypass_prefix_v4`
+			uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
+			// Network bypass allows hivemind to avoid the kernel's network stack, instead using pipes or UNIX domain sockets, saving a lot of CPU
+			// Hivemind sets its pipes under /var/run/hivemind on UNIX-based systems and \\.\hivemind\ on Windows
+			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port.
+			// The default is /144 for IPv6 (Match IP and port exactly) and /48 for IPv4 (ditto), effectively disabling network bypass
+			// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.
+			// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send`)
+			// See also: `encryption_bypass_prefix_v6`, `encryption_bypass_prefix_v4`
+			uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 			// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
 			void* udata;
 			// How long a connection is "remembered" for, in microseconds. Key exchanges are relatively cheap so this affects memory usage more than performance
@@ -63,7 +77,8 @@ typedef void* (*hivemind_pipe_restore_fn_t)(void*, uint8_t*, size_t);
 typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
 
 // See `hivemind_start()`
-static const ip_addr_t HIVEMIND_WAN = {.words={0,0,0,0,0,0xffff,0x0808,0x0808}};
+static const ip_addr_t HIVEMIND_WAN_V4 = {.words={0,0,0,0,0,0xffff,0x0808,0x0808}}; // ::ffff:8.8.8.8
+static const ip_addr_t HIVEMIND_WAN_V6 = {.bytes={32,1,72,96,72,96,0,0,0,0,0,0,8,8,8,8}}; // 2001:4860:4860::8888
 // Initialize a server with the given master key and message callback
 // You are expected to allocate the server struct yourself, and it must have a stable address until the callback handler passed to `hivemind_quit()` is called
 // Additional non-essential parameters can be configured after this function but before `hivemind_start()`. These include

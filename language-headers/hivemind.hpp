@@ -71,7 +71,7 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 		this->mtu_hi = mtu >> 8;
 	}
 	// Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
-	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN, const char* filename = 0, PipeRestoreFn pipe_restore = 0){
+	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN_V4, const char* filename = 0, PipeRestoreFn pipe_restore = 0){
 		return hivemind_start(this, where, reflect_test, filename, (hivemind_pipe_restore_fn_t) pipe_restore);
 	}
 	// Quit the server, optionally saving state to a file (not implemented yet). The callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
