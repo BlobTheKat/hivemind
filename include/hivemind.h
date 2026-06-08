@@ -33,15 +33,15 @@ typedef struct{
 
 			// Encryption bypass allows hivemind to avoid encrypting traffic within an internal network, saving both CPU and a small amount of bandwidth.
 			// To prevent data corruption, accidental replays, etc..., a checksum is still enforced for every packet (specifically, CRC64) as well as other policies similar to encrypted traffic, the main difference being that these policies are only designed to avoid accidental mishaps. A malicious actor with access to your internal network can cause a lot more issues than just that of confidentiality (e.g Denial of service, Message/ack forgery, etc...)
-			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port.
+			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables encryption bypass
 			// The default is /128 for IPv6 (Match IP but port can differ) and /32 for IPv4 (ditto), effectively enabling encryption bypass for traffic to the same machine
 			// This setting should be identical between servers that expect to use encryption bypass. Using different settings may lead to one server rejecting packets sent by another, either because received traffic is expected to be encrypted but isn't, or vice versa.
 			// See also: `network_bypass_prefix_v6`, `network_bypass_prefix_v4`
 			uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
 			// Network bypass allows hivemind to avoid the kernel's network stack, instead using pipes or UNIX domain sockets, saving a lot of CPU
 			// Hivemind sets its pipes under /var/run/hivemind on UNIX-based systems and \\.\hivemind\ on Windows
-			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port.
-			// The default is /144 for IPv6 (Match IP and port exactly) and /48 for IPv4 (ditto), effectively disabling network bypass
+			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables network bypass
+			// The default is 255 for IPv6 (Match IP and port exactly) and 255 for IPv4 (ditto), effectively disabling network bypass
 			// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.
 			// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send`)
 			// See also: `encryption_bypass_prefix_v6`, `encryption_bypass_prefix_v4`

@@ -330,35 +330,35 @@ static size_t read_len_inc(const uint8_t* payload){
 static void encrypt_packet(uint32_t state[16], struct _send_packet* p){
 	uint8_t* pl = p->payload+20;
 	state[12] = 0;
-	if(p->len_p&1){
+	if(p->len_p&8){
 		pl += 16;
 		uint32_t pipeid[5];
 		memcpy(pipeid, pl, 20);
-		ChaCha20_block_xor(state, pl, p->len_p>>1);
+		ChaCha20_block_xor(state, pl, p->len_p>>4);
 		memcpy(pl, pipeid, 20);
-	}else ChaCha20_block_xor(state, pl, p->len_p>>1);
+	}else ChaCha20_block_xor(state, pl, p->len_p>>4);
 	uint32_t d[16]; memcpy(d, state, 64);
 	// RFC 7539 § 2.3-2.4 recommends using in[12] ==0 for AEAD, >0 for payload, and in[13-15] for nonce
 	// One slight change is we use in[12] ==2^32-1 for AEAD and 0..<2^32-1 for payload. This is a stylistic choice
 	// and has no effect on the quality of the resulting keystream. Individual UDP packets will never be able to surpass block counter > 1024
 	d[12] = 0xFFFFFFFF;
 	ChaCha20_block(d);
-	Poly1305(pl, (size_t)(p->len_p>>1)<<6, (uint8_t*)d, p->payload);
+	Poly1305(pl, (size_t)(p->len_p>>4)<<6, (uint8_t*)d, p->payload);
 }
 
-static inline bool addr_compare(ip_addr_t* a, uint16_t ap, ip_addr_t* b, uint16_t bp, uint8_t mv4, uint8_t mv6){
+static inline bool addr_compare(const ip_addr_t* a, uint16_t ap, const ip_addr_t* b, uint16_t bp, uint8_t mv4, uint8_t mv6){
 	if(!(a->dwords[0] | a->dwords[1] | (le32toh(a->words[2])^0xffff0000))){
 		if(b->dwords[0] | b->dwords[1] | (le32toh(b->words[2])^0xffff0000)) return false;
 		// ipv4
 		if(mv4 >= 32){
-			if((ap^bp)>>(48-mv4)) return false;
+			if(mv4 > 48 || (ap^bp)>>(48-mv4)) return false;
 			return a->dwords[3] == b->dwords[3];
 		}
 		return !(mv4 && (be32toh(a->dwords[3] ^ b->dwords[3]) >> (32 - mv4)));
 	}
 	// ipv6
 	if(mv6 >= 128){
-		if((ap^bp)>>(144-mv6)) return false;
+		if(mv6 > 144 || (ap^bp)>>(144-mv6)) return false;
 		return !memcmp16(a->dwords, b->dwords);
 	}
 	if(mv6 >= 8 && memcmp(a, b, mv6>>3)) return false;
@@ -397,4 +397,9 @@ static inline void _crcinitless_packet_finish(hivemind_server_t* s, const remote
 	*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
 	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len + (opts>>23<<2));
 	soft_assert(send_success);
+}
+
+static inline bool isbypass(struct _hivemind_remote* state){
+	hivemind_server_t* s = state->server;
+	return addr_compare(&state->addr, state->port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
 }

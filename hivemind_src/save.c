@@ -117,7 +117,7 @@ static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz
 				struct _send_packet* p2 = 0;
 				if(sz){
 					p2 = malloc(sizeof(struct _send_packet) + sz + 16);
-					p2->first = sz>>16; p2->resent = 0; p2->len_p = (sz+16)>>5;
+					p2->first = sz>>16; p2->resent = 0; p2->len_p = (sz+16)>>2;
 #if SIZE_MAX == UINT64_MAX
 					p2->seq_m = lo0>>32;
 #endif
@@ -192,6 +192,7 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 			uint64_t sl = _time_lock_acq(&state->send_last_used);
 			assert(!state->recv_unlocked_ref && !state->send_unlocked_ref);
 			state->ack_coal_i = 0;
+			bool bypass = isbypass(state);
 			if(save){
 				// Save: { Send, Recv } { Buffer, Seq, Last used } + Read KDW + Write RQR state
 				bool r = rl!=1&&(t>life+life?rl>=t-life-life:true), w = sl!=1&&(t>life?sl>=t-life:true);
@@ -261,7 +262,7 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 						if(i < unsent_i){
 							p = p->next;
 							chacha_in[12] = 0;
-							size_t lseq = lseqof(p);
+							size_t lseq = lseqof(p, bypass);
 							chacha_in[13] = (uint32_t)lseq;
 #if SIZE_MAX == UINT64_MAX
 							chacha_in[14] = (uint32_t)(lseq>>32);

@@ -1,8 +1,9 @@
 #pragma once
-#include "internals.c"
+#include "plumbing.c"
 
 deprecate("Debug")
 static void check_send(struct _hivemind_remote* state){
+	bool bypass = isbypass(state);
 	if(!state->unsent_i)
 		assert(state->send_order_end == &state->send_order_start);
 	size_t lo = state->send_seq_lo-ring_buffer_size(&state->send_queue)/sizeof(struct _send_packet**);
@@ -10,7 +11,7 @@ static void check_send(struct _hivemind_remote* state){
 	for(size_t j = 0; j < state->unsent_i; j += sizeof(struct _send_packet**)){
 		struct _send_packet** v2;
 		ring_buffer_get(&state->send_queue, j, &v2, sizeof(v2), true);
-		if(v2) assert(lo == lseqof(*v2));
+		if(v2) assert(lo == lseqof(*v2, bypass));
 		lo++;
 	}
 }

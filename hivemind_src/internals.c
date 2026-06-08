@@ -3,7 +3,9 @@
 	#define __STDC_WANT_LIB_EXT1__ 1
 #endif
 #include "a.h"
+#define CHACHA20_POLY1305_IMPL
 #include "chacha20poly1305.h"
+#define CRC64_IMPL
 #include "crc64.h"
 #include "x.h"
 #include <time.h>
@@ -55,21 +57,22 @@ struct _send_packet{
 #if SIZE_MAX == UINT64_MAX
 	uint32_t seq_m;
 #endif
-	uint64_t len_p:11, resent:4, first:1, time_lo:48;
+	uint64_t len_p:14, resent:5, first:1, time_lo:44;
 	alignas(4) uint8_t payload[];
 };
 
-static inline size_t lseqof(struct _send_packet* p){
-	if(p->len_p&1) return 0;
-	size_t seq = (size_t)le32toh(*(uint32_t*)(p->payload+16));
-#if SIZE_MAX >= UINT64_MAX
-	seq |= (size_t)p->seq_m<<32;
-#endif
+static inline size_t lseqof(struct _send_packet* p, bool bypass){
+	unsigned ex = bypass?0:8;
+	if((p->len_p&(1|ex))!=1) return 0;
+	size_t seq = (size_t)le32toh(*(uint32_t*)(p->payload+8+ex));
+	#if SIZE_MAX >= UINT64_MAX
+		seq |= (size_t)p->seq_m<<32;
+	#endif
 	return seq;
 }
 
 static inline unsigned lenof(struct _send_packet* p){
-	return (unsigned)(p->len_p<<5) | (p->len_p&1 ? 4u : 20u);
+	return (unsigned)(p->len_p<<2);
 }
 
 #ifdef __SIZEOF_INT128__
