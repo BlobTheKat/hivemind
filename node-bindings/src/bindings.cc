@@ -90,7 +90,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	}
 
 	static Napi::Function GetClass(Napi::Env env){
-		return DefineClass(env, "HivemindServerJS", {
+		return DefineClass(env, "HivemindServer", {
 			StaticMethod("pipeToString", &HivemindServerJS::PipeToString),
 			StaticMethod("pipeFromString", &HivemindServerJS::PipeFromString),
 			InstanceMethod("listen", &HivemindServerJS::listen),
@@ -198,7 +198,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		assert(err == 0, "uv_async_init");
 		if(!hivemind_start(&server_, r, test, 0, 0)){
 			uv_unref((uv_handle_t*)&async_handle);
-			Napi::Error::New(info.Env(), "Failed to execute 'listen' on 'HivemindServerJS': could not bind to address").ThrowAsJavaScriptException();
+			Napi::Error::New(info.Env(), "Failed to execute 'listen' on 'HivemindServer': could not bind to address").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
 		}
 		this->state = State::OPEN;

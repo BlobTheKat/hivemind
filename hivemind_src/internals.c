@@ -1,7 +1,4 @@
 #pragma once
-#if defined(__APPLE__) && !defined(__STDC_WANT_LIB_EXT1__)
-	#define __STDC_WANT_LIB_EXT1__ 1
-#endif
 #include "a.h"
 #define CHACHA20_POLY1305_IMPL
 #include "chacha20poly1305.h"

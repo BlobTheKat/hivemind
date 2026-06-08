@@ -2,13 +2,14 @@ import { HivemindServer } from './src/node.js'
 import { BufWriter, BufReader } from 'nanobuf'
 import fs from 'fs/promises'
 
+/** @type {import('./index.d.ts').HivemindServer} server */
 const server = new HivemindServer({
 	key: await fs.readFile('../.master.key').catch(_e => {
 		const key = crypto.getRandomValues(new Uint8Array(32))
 		return fs.writeFile('../.master.key', key).then(() => key)
 	}),
 })
-await server.listen(3331, '127.0.0.1')
+await server.listen(3331, '127.0.0.1', '', '127.0.0.1')
 console.log('\x1b[32mListening on :%d\x1b[m', server.address().port)
 
 const pipe = server.createPipe(buf2 => {

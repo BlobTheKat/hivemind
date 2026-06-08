@@ -15,7 +15,7 @@ uint64_t crc64(uint64_t init, const uint8_t* data, size_t len);
 
 #if defined(CRC64_IMPL) || defined(__INTELLISENSE__)
 
-uint64_t crc64__software(uint64_t x, const uint8_t *data, size_t len){
+static uint64_t crc64__software(uint64_t x, const uint8_t *data, size_t len){
 	for (size_t i = 0; i < len; ++i) {
 		x ^= (uint64_t)data[i];
 		for(unsigned bit = 0; bit < 8; ++bit)
@@ -32,11 +32,12 @@ uint64_t crc64__software(uint64_t x, const uint8_t *data, size_t len){
 
 #if defined(__ARM_ARCH) && __ARM_ARCH >= 8
 #define _CRC64_ARM
-#define crc64__simd crc64
+#define _CRC64_ARM_RISCV_TARGET __attribute__((target("aes")))
 #include <arm_neon.h>
 #elif defined(__riscv) && (__riscv_xlen >= 64) && (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin)
 #if __has_builtin(__builtin_cpu_supports)
 #define _CRC64_RISCV
+#define _CRC64_ARM_RISCV_TARGET __attribute__((target("zbc")))
 #include <stdatomic.h>
 #include <riscv_bitmanip.h>
 #endif
@@ -70,9 +71,9 @@ static uint64_t crc64__simd(uint64_t crc, const uint8_t* data, size_t len){
 	return crc64__software(0, tail, 16 + len);
 }
 
-uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
-uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
-uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
+static uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
+static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 #ifdef _MSC_VER
 	int cpuInfo[4];
 	__cpuid(cpuInfo, 1);
@@ -84,9 +85,9 @@ uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 	atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
 	impl(crc, data, len);
 }
-_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len) };
+_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ return atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len) };
 
-#elif defined(_CRC64_ARM) || defined(_CRC64_RISCV)
+#elif defined(_CRC64_ARM_RISCV_TARGET)
 
 #if defined(_MSC_VER) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 	#define _crc64_le64bswap(x) ((uint64_t)(x))
@@ -94,7 +95,7 @@ _CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len
 	#define _crc64_le64bswap(x) __builtin_bswap64(x)
 #endif
 
-uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
+_CRC64_ARM_RISCV_TARGET static uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
 	if(len < 32) return crc64__software(crc, data_, len);
 
 #ifdef _MSC_VER
@@ -125,25 +126,35 @@ uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
 
 	return crc64__software(0, (uint8_t*) tail, 16+len);
 }
-
+static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
+static uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
+_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ return atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len); };
 #ifdef _CRC64_RISCV
-	uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
-	uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
-	uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+	static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = __builtin_cpu_supports("zbc") > 0 ? crc64__simd : crc64__software;
 		atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
 		impl(crc, data, len);
 	}
-	_CRC64_ALWAYSINLINE static uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len) };
 	#undef _CRC64_RISCV
 #else
-	#undef _CRC64_ARM
-	#undef crc64__simd
+	#include <sys/auxv.h>
+	#include <asm/hwcap.h>
+	static uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = (getauxval(AT_HWCAP) & HWCAP_PMULL)
+#ifdef HWCAP2_PMULL
+			|| (getauxval(AT_HWCAP2) & HWCAP2_PMULL)
 #endif
+			? crc64__simd : crc64__software;
+		atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
+		return impl(crc, data, len);
+	}
+	#undef _CRC64_ARM
+#endif
+#undef _CRC64_ARM_RISCV_TARGET
 
 #undef _crc64_le64bswap
 #else
-_CRC64_ALWAYSINLINE static uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ crc64__software(crc, data, len) };
+_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ return crc64__software(crc, data, len) };
 #endif
 #undef _CRC64_ALWAYSINLINE
 

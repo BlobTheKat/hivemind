@@ -566,10 +566,10 @@ static x_socket_t x_udp_bound(remote_t from){
 	fcntl(fd, F_SETFD, FD_CLOEXEC);
 	fcntl(fd, F_SETFL, O_NONBLOCK);
 #endif
-	if(fd < 0) return X_FILE_INVALID;
+	if(fd < 0) return X_SOCKET_INVALID;
 	if(setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &addr.sin6_flowinfo, 4) < 0 || bind(fd, (struct sockaddr*)&addr, sizeof(addr)) || fcntl(fd, F_SETFL, O_NONBLOCK) < 0){
 		close(fd);
-		fd = X_FILE_INVALID;
+		fd = X_SOCKET_INVALID;
 	}
 	return fd;
 }
@@ -614,7 +614,7 @@ static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from){
 		if(getifaddrs(&ifap)) return false;
 		if(!from->addr.dwords[0] && !from->addr.dwords[1] && from->addr.dwords[2] == ntohl(0x0000FFFF)){
 			// ipv4
-			o = 28;
+			//o = 28;
 			for(struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next){
 				struct sockaddr_in* addr = (struct sockaddr_in*) ifa->ifa_addr;
 				if(!addr || addr->sin_family != AF_INET) continue;

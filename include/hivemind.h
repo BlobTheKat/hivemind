@@ -78,6 +78,7 @@ typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
 
 // See `hivemind_start()`
 static const ip_addr_t HIVEMIND_WAN_V4 = {.words={0,0,0,0,0,0xffff,0x0808,0x0808}}; // ::ffff:8.8.8.8
+// See `hivemind_start()`
 static const ip_addr_t HIVEMIND_WAN_V6 = {.bytes={32,1,72,96,72,96,0,0,0,0,0,0,8,8,8,8}}; // 2001:4860:4860::8888
 // Initialize a server with the given master key and message callback
 // You are expected to allocate the server struct yourself, and it must have a stable address until the callback handler passed to `hivemind_quit()` is called

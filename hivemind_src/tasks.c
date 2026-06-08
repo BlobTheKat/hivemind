@@ -675,12 +675,13 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 					_resolve_seq(&lo0, &hi, seq);
 					size_t i0 = (lo0 - lo2) * sizeof(struct _send_packet**);
 					lo2 += state->unsent_i/sizeof(struct _send_packet**);
-					if(i0 >= state->unsent_i+(128*sizeof(struct _send_packet**))) continue;
-					//printf("ack'd [%u,%llu]", hi, lo0);
-					*(uint32_t*)(packet+4) = htole32(lo0>>32);
-					*(uint32_t*)packet = htole32(hi);
-					if(plen > 12 && !packet[plen-4]) plen -= 4;
-					if(crc64(state->recv_crcinit, packet, plen) == crc) _ackd(state, packet, plen, tim, lo0, lo2, hi, i0, true);
+					if(i0 < state->unsent_i+(128*sizeof(struct _send_packet**))){
+						//printf("ack'd [%u,%llu]", hi, lo0);
+						*(uint32_t*)(packet+4) = htole32(lo0>>32);
+						*(uint32_t*)packet = htole32(hi);
+						if(plen > 12 && !packet[plen-4]) plen -= 4;
+						if(crc64(state->recv_crcinit, packet, plen) == crc) _ackd(state, packet, plen, tim, lo0, lo2, hi, i0, true);
+					}
 					_time_lock_rel(&state->send_last_used, tim);
 					continue;
 				}
@@ -770,7 +771,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 				l = _time_lock_acq(&state->recv_last_used);
 				state->recv_unlocked_ref--;
 				_time_lock_rel(&state->recv_last_used, l);
-				continue; // poly failed
+				continue; // crc failed
 			}
 			uint8_t* p = packet + header; plen -= header;
 			l = _time_lock_acq(&state->recv_last_used);
@@ -820,21 +821,21 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 
 				size_t i0 = (lo0 - lo2) * sizeof(struct _send_packet**);
 				lo2 += state->unsent_i/sizeof(struct _send_packet**);
-				if(i0 >= state->unsent_i+(128*sizeof(struct _send_packet**))) continue;
-				//printf("ack'd [%u,%llu]", hi, lo0);
-
-				union{
-					uint32_t words[16];
-					uint8_t bytes[64];
-				} chacha = {.words = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}}; // "expand 32-byte k"
-				memcpy(chacha.words+4, state->send_key, 32);
-				chacha.words[12] = 0xFFFFFFFE; chacha.words[13] = (uint32_t)lo0;
-				chacha.words[14] = (uint32_t)(lo0>>32); chacha.words[15] = hi;
-				ChaCha20_block(chacha.words);
-				Poly1305(packet+20, plen-20, chacha.bytes, chacha.bytes+32);
-				uint32_t *dtag = (uint32_t*)(chacha.bytes+32), *ptag = (uint32_t*)packet;
-				if(!memcmp16(dtag, ptag)) _ackd(state, packet, plen, tim, lo0, lo2, hi, i0, false);
-				// else poly failed
+				if(i0 < state->unsent_i+(128*sizeof(struct _send_packet**))){
+					//printf("ack'd [%u,%llu]", hi, lo0);
+					union{
+						uint32_t words[16];
+						uint8_t bytes[64];
+					} chacha = {.words = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}}; // "expand 32-byte k"
+					memcpy(chacha.words+4, state->send_key, 32);
+					chacha.words[12] = 0xFFFFFFFE; chacha.words[13] = (uint32_t)lo0;
+					chacha.words[14] = (uint32_t)(lo0>>32); chacha.words[15] = hi;
+					ChaCha20_block(chacha.words);
+					Poly1305(packet+20, plen-20, chacha.bytes, chacha.bytes+32);
+					uint32_t *dtag = (uint32_t*)(chacha.bytes+32), *ptag = (uint32_t*)packet;
+					if(!memcmp16(dtag, ptag)) _ackd(state, packet, plen, tim, lo0, lo2, hi, i0, false);
+					// else poly failed
+				}
 				_time_lock_rel(&state->send_last_used, tim);
 				continue;
 			}

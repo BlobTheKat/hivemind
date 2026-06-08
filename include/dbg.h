@@ -64,6 +64,7 @@ static void hexdump(const void *data, size_t len){
 }
 
 #ifdef NO_STDIO
+#include "stdarg.h"
 deprecate("printf() with -DNO_STDIO") static int (*const printf_2)(const char* _, ...) = printf;
 #define printf printf_2
 deprecate("scanf() with -DNO_STDIO") static int (*const scanf_2)(const char* _, ...) = scanf;

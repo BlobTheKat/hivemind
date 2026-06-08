@@ -8,6 +8,8 @@ FLAGS="-Wno-vla -Wno-unused -Wno-deprecated -DNO_STDIO -DNDEBUG -flto -O3 -Wall 
 
 if [ -n "${TEST+x}" ]; then
 	FLAGS="-Wno-vla -Wno-unused -Wno-deprecated -DNO_SOFT_ASSERT -DHIVEMIND_NO_LOCAL_BYPASS -g3 -fsanitize=address,undefined -Wall -Wextra -Werror -Wno-unused -Wno-unused-parameter -Wno-unused-command-line-argument"
+elif [ -n "${FTEST+x}" ]; then
+	FLAGS="-Wno-vla -Wno-unused -Wno-deprecated -DNO_SOFT_ASSERT -DHIVEMIND_NO_LOCAL_BYPASS -g3 -Wall -Wextra -Werror -Wno-unused -Wno-unused-parameter -Wno-unused-command-line-argument"
 fi
 
 printf "\e[4A\e[33;2m  *****************************\n ***                         ***\n***     \e[mBuilding \e[33;3mHivemind\e[33;2m     ***\n ***                         ***\n  *****************************\n\e[m\n"

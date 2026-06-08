@@ -1,4 +1,4 @@
-export default class HivemindServer{
+export class HivemindServer{
 
 	static pipeToString(pipe: ArrayBuffer): string
 	static pipeFromString(pipeStr: string): ArrayBuffer
