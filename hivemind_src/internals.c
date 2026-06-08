@@ -4,6 +4,7 @@
 #endif
 #include "a.h"
 #include "chacha20poly1305.h"
+#include "crc64.h"
 #include "x.h"
 #include <time.h>
 #include <stdatomic.h>

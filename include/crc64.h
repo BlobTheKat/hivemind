@@ -32,9 +32,13 @@ uint64_t crc64__software(uint64_t x, const uint8_t *data, size_t len){
 
 #if defined(__ARM_ARCH) && __ARM_ARCH >= 8
 #define _CRC64_ARM
+#define crc64__simd crc64
+#include <arm_neon.h>
 #elif defined(__riscv) && (__riscv_xlen >= 64) && (defined(__GNUC__) || defined(__clang__)) && defined(__has_builtin)
 #if __has_builtin(__builtin_cpu_supports)
 #define _CRC64_RISCV
+#include <stdatomic.h>
+#include <riscv_bitmanip.h>
 #endif
 #endif
 
@@ -47,27 +51,27 @@ __attribute__((target("pclmul,sse4.1")))
 static uint64_t crc64__simd(uint64_t crc, const uint8_t* data, size_t len){
 	static const __m128i rk1_rk2 = _mm_set_epi64x(0x381d0015c96f4444ull, 0xd9d7be7d505da32cull);
 
-	if(len < 32) return crc64__software(crc, tail, 32);
+	if(len < 32) return crc64__software(crc, data, len);
 
 	__m128i acc = _mm_loadu_si128((const __m128i*) data);
 	acc = _mm_xor_si128(acc, _mm_set_epi64x(0, crc));
 	data += 16; len -= 16;
 
 	do{
-		__m128i data = _mm_loadu_si128((const __m128i*) data);
-		acc = _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128(acc, rk1_rk2, 0x00), _mm_clmulepi64_si128(acc, rk1_rk2, 0x11)), data);
+		__m128i ch = _mm_loadu_si128((const __m128i*) data);
+		acc = _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128(acc, rk1_rk2, 0x00), _mm_clmulepi64_si128(acc, rk1_rk2, 0x11)), ch);
 		data += 16; len -= 16;
 	}while(len >= 16);
 
 	uint8_t tail[32];
 	_mm_storeu_si128((__m128i*) tail, acc);
-	memcpy(tail + 16, data, len);
+	if(len) memcpy(tail + 16, data, len);
 
 	return crc64__software(0, tail, 16 + len);
 }
 
 uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
-uint64_t (*crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
+uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
 uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 #ifdef _MSC_VER
 	int cpuInfo[4];
@@ -76,10 +80,11 @@ uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
 #else
 	int supports = __builtin_cpu_supports("pclmul") > 0 && __builtin_cpu_supports("sse4.1") > 0;
 #endif
-	crc64__impl = supports ? crc64__simd : crc64__software;
-	crc64__impl(crc, data, len);
+	uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = supports ? crc64__simd : crc64__software;
+	atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
+	impl(crc, data, len);
 }
-_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ crc64__impl(crc, data, len) };
+_CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len) };
 
 #elif defined(_CRC64_ARM) || defined(_CRC64_RISCV)
 
@@ -87,13 +92,6 @@ _CRC64_ALWAYSINLINE uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len
 	#define _crc64_le64bswap(x) ((uint64_t)(x))
 #else
 	#define _crc64_le64bswap(x) __builtin_bswap64(x)
-#endif
-
-#ifdef _CRC64_ARM
-	#include <arm_neon.h>
-	#define crc64__simd crc64
-#else
-	#include <riscv_bitmanip.h>
 #endif
 
 uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
@@ -114,7 +112,6 @@ uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
 		poly128_t p1 = vmull_p64((poly64_t)acc[1], (poly64_t)0x381d0015c96f4444ull);
 		uint64x2_t r = veorq_u64(vreinterpretq_u64_p128(p0), vreinterpretq_u64_p128(p1));
 		acc[0] = vgetq_lane_u64(r, 0); acc[1] = vgetq_lane_u64(r, 1);
-	#undef _CRC64_ARM
 #else
 		uint64_t p0lo = __builtin_riscv_clmul(acc[0], 0xd9d7be7d505da32cull), p0hi = __builtin_riscv_clmulh(acc[0], 0xd9d7be7d505da32cull);
 		uint64_t p1lo = __builtin_riscv_clmul(acc[1], 0x381d0015c96f4444ull), p1hi = __builtin_riscv_clmulh(acc[1], 0x381d0015c96f4444ull);
@@ -130,15 +127,18 @@ uint64_t crc64__simd(uint64_t crc, const uint8_t* data_, size_t len){
 }
 
 #ifdef _CRC64_RISCV
-uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
-uint64_t (*crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
-uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
-	crc64__impl = __builtin_cpu_supports("zbc") > 0 ? crc64__simd : crc64__software;
-	crc64__impl(crc, data, len);
-}
-_CRC64_ALWAYSINLINE static uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ crc64__impl(crc, data, len) };
-
-#undef _CRC64_RISCV
+	uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len);
+	uint64_t (*_Atomic crc64__impl)(uint64_t, const uint8_t*, size_t) = crc64__decide;
+	uint64_t crc64__decide(uint64_t crc, const uint8_t* data, size_t len){
+		uint64_t (*impl)(uint64_t, const uint8_t*, size_t) = __builtin_cpu_supports("zbc") > 0 ? crc64__simd : crc64__software;
+		atomic_store_explicit(&crc64__impl, impl, memory_order_relaxed);
+		impl(crc, data, len);
+	}
+	_CRC64_ALWAYSINLINE static uint64_t crc64(uint64_t crc, const uint8_t* data, size_t len){ atomic_load_explicit(&crc64__impl, memory_order_relaxed)(crc, data, len) };
+	#undef _CRC64_RISCV
+#else
+	#undef _CRC64_ARM
+	#undef crc64__simd
 #endif
 
 #undef _crc64_le64bswap

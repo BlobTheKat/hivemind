@@ -56,7 +56,7 @@ void Poly1305(const uint8_t *in, size_t inlen, const uint8_t key[32], uint8_t ou
     c = vaddq_u32(c, d); b = veorq_u32(b, c); b = veorq_u32(vshlq_n_u32(b, 7), vshrq_n_u32(b, 25)); \
 } while(0)
 
-void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n) {
+void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){
 	start: {}
 	uint32x4_t a = vld1q_u32(in + 0);
 	uint32x4_t b = vld1q_u32(in + 4);
@@ -227,12 +227,12 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		__riscv_vse32_v_u32m1((uint32_t*)io + 12, __riscv_vadd_vv_u32m1(d, __riscv_vle32_v_u32m1(io + 12, vl), vl), vl);
 	}
 
-	extern static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
-	extern static void (*ChaCha20_block__impl)(uint32_t[16]);
+	extern static void (*_Atomic ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
+	extern static void (*_Atomic ChaCha20_block__impl)(uint32_t[16]);
 	_CC20_P1305_ALWAYSINLINE static void _cc20_p1305_simd_decide(){
 		int supports = __builtin_cpu_supports("v") > 0 && __builtin_cpu_supports("zvkb") > 0;
-		ChaCha20_block_xor__impl = supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software;
-		ChaCha20_block__impl = supports ? ChaCha20_block__simd : ChaCha20_block__software;
+		atomic_store_explicit(&ChaCha20_block_xor__impl, supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software, memory_order_relaxed);
+		atomic_store_explicit(&ChaCha20_block__impl, supports ? ChaCha20_block__simd : ChaCha20_block__software, memory_order_relaxed);
 	}
 
 #else
@@ -310,8 +310,8 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		_mm_storeu_si128((__m128i*)(io + 32), _mm_add_epi32(c, _mm_loadu_si128((const __m128i*)(io + 8))));
 		_mm_storeu_si128((__m128i*)(io + 48), _mm_add_epi32(d, _mm_loadu_si128((const __m128i*)(io + 12))));
 	}
-	extern static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
-	extern static void (*ChaCha20_block__impl)(uint32_t[16]);
+	extern static void (*_Atomic ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t);
+	extern static void (*_Atomic ChaCha20_block__impl)(uint32_t[16]);
 	_CC20_P1305_ALWAYSINLINE static void _cc20_p1305_simd_decide(){		
 #ifdef _MSC_VER
 		int cpuInfo[4];
@@ -320,24 +320,25 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 #else
       int supports = __builtin_cpu_supports("ssse3") > 0;
 #endif
-		ChaCha20_block_xor__impl = supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software;
-		ChaCha20_block__impl = supports ? ChaCha20_block__simd : ChaCha20_block__software;
+		atomic_store_explicit(&ChaCha20_block_xor__impl, supports ? ChaCha20_block_xor__simd : ChaCha20_block_xor__software, memory_order_relaxed);
+		atomic_store_explicit(&ChaCha20_block__impl, supports ? ChaCha20_block__simd : ChaCha20_block__software, memory_order_relaxed);
 	}
 #else
 	_CC20_P1305_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__software(io); }
 	_CC20_P1305_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(in, out, n); }
 #endif
 #ifdef _CC20_P1305_SIMD
+	#include <stdatomic.h>
 	static void ChaCha20_block_xor__decide(uint32_t in[16], uint8_t out[64], uint32_t n){
-		_cc20_p1305_simd_decide(); ChaCha20_block_xor__impl(in, out, n);
+		_cc20_p1305_simd_decide(); atomic_load_explicit(&ChaCha20_block_xor__impl, memory_order_relaxed)(in, out, n);
 	}
 	static void ChaCha20_block__decide(uint32_t io[16]){
-		_cc20_p1305_simd_decide(); ChaCha20_block__impl(io);
+		_cc20_p1305_simd_decide(); atomic_load_explicit(&ChaCha20_block__impl, memory_order_relaxed)(io);
 	}
-	static void (*ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t) = ChaCha20_block_xor__decide;
-	static void (*ChaCha20_block__impl)(uint32_t[16]) = ChaCha20_block__decide;
-	_CC20_P1305_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ ChaCha20_block_xor__impl(in, out, n); }
-	_CC20_P1305_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ ChaCha20_block__software(io); }
+	static void (*_Atomic ChaCha20_block_xor__impl)(uint32_t[16], uint8_t[64], uint32_t) = ChaCha20_block_xor__decide;
+	static void (*_Atomic ChaCha20_block__impl)(uint32_t[16]) = ChaCha20_block__decide;
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){ atomic_load_explicit(&ChaCha20_block_xor__impl, memory_order_relaxed)(in, out, n); }
+	_CC20_P1305_ALWAYSINLINE void ChaCha20_block(uint32_t io[16]){ atomic_load_explicit(&ChaCha20_block__impl, memory_order_relaxed)(io); }
 	#undef _CC20_P1305_SIMD
 #endif
 #undef _CC20_P1305_ALWAYSINLINE
