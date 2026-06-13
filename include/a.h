@@ -298,26 +298,45 @@ static inline uint64_t epoch_now(void);
 static inline uint64_t thread_now(void);
 
 #ifdef _WIN32
-// Opaque thread handle type. This value is guaranteed to not be zero for any valid thread, and can be equality-tested using `==` as normal.
-// The windows implementation performs a small amount of additional bookkeeping as Windows APIs differ substantially from POSIX and from what this library guarantees.
-typedef struct _thread_t* thread_t;
+	// Opaque thread handle type. This value is guaranteed to not be zero for any valid thread, and can be equality-tested using `==` as normal.
+	// The windows implementation performs a small amount of additional bookkeeping as Windows APIs differ substantially from POSIX and from what this library guarantees.
+	typedef struct _thread_t* thread_t;
+	typedef uintptr_t wait_t;
 #else
-#include <pthread.h>
-// Opaque thread handle type. This value is guaranteed to not be zero for any valid thread, and can be equality-tested using `==` as normal.
-typedef pthread_t thread_t;
+	#include <pthread.h>
+	// Opaque thread handle type. This value is guaranteed to not be zero for any valid thread, and can be equality-tested using `==` as normal.
+	typedef pthread_t thread_t;
+	#if defined(__NetBSD__) || defined(__sun)
+		#ifdef __sun
+			#include <sys/lwp.h>
+			#include <thread.h>
+		#else
+			#include <lwp.h>
+		#endif
+	typedef lwpid_t wait_t;
+	#else
+	typedef uintptr_t wait_t;
+	#endif
 #endif
 
 // Create a new thread that starts executing the given function with the given argument. The `stack` parameter specifies the desired stack size for the new thread, or `0` to use the system default. Returns a handle to the new thread, or `(thread_t)0` on failure.
 static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack);
 
 // Wait for the given thread to finish executing and return the value returned by the thread's function. The thread's resources and handle are automatically freed by this function, and must not be used after calling this function. It is undefined behavior to call this function more than once on the same thread, or on a thread that has been detached (see `thread_detach`).
-static inline void* thread_wait(thread_t t);
-// Mark a thread as detached. The OS will not wait for the thread's function to return when the main thread exits. The thread's resources are also freed immediately when it returns, and not when `thread_wait` is called. It is undefined behavior to call this function more than once on the same thread, or on a thread that is already being waited on (see `thread_wait`).
+static inline void* thread_join(thread_t t);
+// Mark a thread as detached. The OS will not wait for the thread's function to return when the main thread exits. The thread's resources are also freed immediately when it returns, and not when `thread_join` is called. It is undefined behavior to call this function more than once on the same thread, or on a thread that is already being waited on (see `thread_join`).
 static inline void thread_detach(thread_t t);
 
 // Return a handle to the current thread. The returned value is guaranteed to compare `==` to the value returned by `thread_create` for that thread.
 // When this function is called from a thread that was not created by `thread_create` (e.g. the main thread or a thread created by another library), it will compare `!=` to all valid thread handles returned by `thread_create`, and `!=` to `(thread_t)0`, but is otherwise unspecified (e.g. it may return a unique value for each thread, or the same value for all threads).
 static inline thread_t thread_self(void);
+
+// Get a wait token used by `thread_wait` and `thread_wake`
+static inline wait_t thread_wait_token();
+// Pause execution of the current thread until any thread calls `thread_wake()` on the same token. The token passed to this function must have been obtained by `thread_wait_token()` on the same thread. If `thread_wake()` is called before this function is called, then it will return immediately.
+static inline void thread_wait(wait_t token);
+// Resume the execution of another thread from a wait token (see `thread_wait()`). The token passed to this function must have been obtained by `thread_wait_token()` on the thread to resume. Calling `thread_wake()` multiple times for one wait token is undefined behavior.
+static inline void thread_wake(wait_t token);
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -367,9 +386,11 @@ struct _thread_t{
 
 static inline size_t available_concurrency(void){ DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); return n <= 0 ? 1 : n; }
 
-static _Thread_local thread_t _thread_self = (thread_t)-1;
+static _Thread_local thread_t _a_thread_self = (thread_t)-1;
+static _Thread_local uint8_t _a_park_flag = 0;
+
 static inline DWORD WINAPI _thread_wrapper(void* a_){
-	struct _thread_t* a = _thread_self = (struct _thread_t*)a_;
+	struct _thread_t* a = _a_thread_self = (struct _thread_t*)a_;
 	a->arg = a->fn(a->arg);
 	HANDLE h = atomic_exchange_explicit(&a->_handle, 0, memory_order_release);
 	if(h) CloseHandle(h);
@@ -388,7 +409,7 @@ static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack
 	return t;
 }
 
-static inline void* thread_wait(thread_t t){
+static inline void* thread_join(thread_t t){
 	HANDLE h = atomic_load_explicit(&t->_handle, memory_order_acquire);
 	if(h){
 		WaitForSingleObject(h, INFINITE);
@@ -404,7 +425,7 @@ static inline void thread_detach(thread_t t){
 	else free(t);
 }
 
-static inline thread_t thread_self(void){ return _thread_self; }
+static inline thread_t thread_self(void){ return _a_thread_self; }
 static inline void thread_yield(void){ SwitchToThread(); }
 #define _SLEEP_MAX (uint64_t)(INFINITE-1)
 static inline void thread_sleep(uint64_t useconds){
@@ -419,6 +440,19 @@ static inline void thread_sleep(uint64_t useconds){
 
 static inline bool thread_set_priority(thread_priority_t p){
 	return SetThreadPriority(GetCurrentThread(), p == THREAD_PRIO_BACKGROUND ? THREAD_PRIORITY_LOWEST : p == THREAD_PRIO_REALTIME ? THREAD_PRIORITY_TIME_CRITICAL : THREAD_PRIORITY_NORMAL);
+}
+
+static inline wait_t thread_wait_token(){
+	return (uintptr_t)&_a_park_flag;
+}
+static inline void thread_wait(wait_t v){
+	uint8_t zero = 0;
+	WaitOnAddress((uint8_t*)v, &zero, 1, INFINITE);
+	*(uint8_t*)v = 0;
+}
+static inline void thread_wake(wait_t v){
+	*(uint8_t*)v = 1;
+	WakeByAddressSingle((uint8_t*)v);
 }
 
 static inline uint64_t mono_now(void){
@@ -654,7 +688,37 @@ static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack
 }
 
 static inline void thread_detach(thread_t t){ pthread_detach(t); }
-static inline void* thread_wait(thread_t t){ void* res; pthread_join(t, &res); return res; }
+static inline void* thread_join(thread_t t){ void* res; pthread_join(t, &res); return res; }
+
+#if defined(__NetBSD__) || defined(__sun)
+
+static inline wait_t thread_wait_token(){ return _lwp_self(); }
+static inline void thread_wait(wait_t token){
+	// Useless arguments
+#ifdef __sun
+	_lwp_park(0, 0, 0, 0);
+#else
+	_lwp_park(0, 0, 0, 0, 0, 0);
+#endif
+}
+static inline void thread_wake(wait_t token){ _lwp_unpark(token, 0); }
+
+#else
+
+static _Thread_local uint32_t _a_park_flag = 0;
+static inline wait_t thread_wait_token(){
+	return (uintptr_t)&_a_park_flag;
+}
+static inline void thread_wait(wait_t v){
+	_atomic_futex32((uint32_t*)v, 0);
+	*(uint32_t*)v = 0;
+}
+static inline void thread_wake(wait_t v){
+	*(uint32_t*)v = 1;
+	_atomic_wake32(v, 1);
+}
+
+#endif
 
 static inline thread_t thread_self(void){ return pthread_self(); }
 static inline void thread_yield(void){ sched_yield(); }

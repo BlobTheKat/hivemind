@@ -103,7 +103,7 @@ int main(){
 	work(0);
 	#if THREADS > 1
 	for(int i = 0; i < THREADS-1; i++){
-		thread_wait(thrs[i]);
+		thread_join(thrs[i]);
 	}
 	#endif
 }

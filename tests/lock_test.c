@@ -31,6 +31,6 @@ int main(){
 		lock_acquire(&sema4, 1);
 		i++;
 	}
-	thread_wait(worker);
+	thread_join(worker);
 	return 0;
 }

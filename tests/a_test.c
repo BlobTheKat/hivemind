@@ -44,6 +44,6 @@ int main(){
 		atomic_wake_condition(&done, 1);
 		i += 2;
 	}
-	thread_wait(worker);
+	thread_join(worker);
 	return 0;
 }
