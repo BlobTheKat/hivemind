@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <assert.h>
 
 #if defined(__clang__) || defined(__GNUC__)
 #  define deprecate(msg) __attribute__((deprecated(msg)))
@@ -14,7 +15,6 @@
 #undef assert
 #ifndef NDEBUG
 	// Reimplement assert bc it's funny
-	#undef assert
 	#if defined(__clang__) || defined(__GNUC__)
 		#define __assert(expr, msg, ...) (void)(__builtin_expect(!(expr), 0)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__builtin_trap(),0))
 		#define soft_assert(expr) (void)(__builtin_expect(!(expr),0)&&(__builtin_debugtrap(),0))

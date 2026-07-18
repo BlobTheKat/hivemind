@@ -41,18 +41,18 @@
 	#define be32toh(x) OSSwapBigToHostInt32(x)
 	#define be64toh(x) OSSwapBigToHostInt64(x)
 #elif defined(_MSC_VER) || defined(__OpenBSD__)
-#if defined(_MSC_VER)
-	#include <stdlib.h>
-	#define bswap_16(x) _byteswap_ushort(x)
-	#define bswap_32(x) _byteswap_ulong(x)
-	#define bswap_64(x) _byteswap_uint64(x)
-#else
-	#include <sys/types.h>
-	#include <sys/endian.h>
-	#define bswap_16(x) swap16(x)
-	#define bswap_32(x) swap32(x)
-	#define bswap_64(x) swap64(x)
-#endif
+	#if defined(_MSC_VER)
+		#include <stdlib.h>
+		#define bswap_16(x) _byteswap_ushort(x)
+		#define bswap_32(x) _byteswap_ulong(x)
+		#define bswap_64(x) _byteswap_uint64(x)
+	#else
+		#include <sys/types.h>
+		#include <sys/endian.h>
+		#define bswap_16(x) swap16(x)
+		#define bswap_32(x) swap32(x)
+		#define bswap_64(x) swap64(x)
+	#endif
 	#if defined(_MSC_VER) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 		#define htole16(x) ((uint16_t)(x))
 		#define htole32(x) ((uint32_t)(x))
@@ -79,22 +79,22 @@
 	#include <endian.h>
 #endif
 
-static _Atomic uint32_t _atomic_waiter_pool[32];
+_Atomic uint32_t _atomic_waiter_pool[32];
 // `lock_t` is a simple 32-bit semaphore primitive, it can be used as a mutex, semaphore, barrier, condition variable, etc...
 // It is guaranteed to be the most efficient waiting primitive on the platform. All operations best-case-scenario (i.e uncontended) are also guaranteed to be free from kernel context switch.
 // This type is implemented with futexes on linux/openbsd, `_umtx` on freebsd, `ulock` on macos, `WaitOnAddress` on windows and `sched_yield` on other POSIX systems.
 typedef _Atomic uint32_t lock_t;
 
-#if !defined(alignas) && !defined(__cplusplus)
-#define alignas _Alignas
+#ifndef __cplusplus
+	#ifndef alignas
+		#define alignas _Alignas
+	#endif
+	// Atomic qualifier. Can be used like `atomic T` or `atomic(T)`, identically to `_Atomic`.
+	// Not available in C++, to avoid conflicts with std::atomic.
+	#define atomic _Atomic
+	#define thread_local _Thread_local
 #endif
 
-#ifndef __cplusplus
-// Atomic qualifier. Can be used like `atomic T` or `atomic(T)`, identically to `_Atomic`.
-// Not available in C++, to avoid conflicts with std::atomic.
-#define atomic _Atomic
-#define thread_local _Thread_local
-#endif
 typedef _Atomic(uint8_t) atomic_uint8_t;
 typedef _Atomic(int8_t) atomic_int8_t;
 typedef _Atomic(uint16_t) atomic_uint16_t;
@@ -104,9 +104,9 @@ typedef _Atomic(int32_t) atomic_int32_t;
 typedef _Atomic(uint64_t) atomic_uint64_t;
 typedef _Atomic(int64_t) atomic_int64_t;
 
-// Number of seconds in a microsecond (the unit used by all functions in this library). Equal to one million (1,000,000) as a type of at least 64 bits
+// Number of seconds in a microsecond (the unit used by all time-related functions in this library). Equal to one million (1,000,000) as a type of at least 64 bits
 #define SECOND_US 1000000ull
-// Number of milliseconds in a microsecond (the unit used by all functions in this library). Equal to one thousand (1,000) as a type of at least 64 bits
+// Number of milliseconds in a microsecond (the unit used by all time-related functions in this library). Equal to one thousand (1,000) as a type of at least 64 bits
 #define MILLISECOND_US 1000ull
 
 // Thread priority constants. See `thread_set_priority`.
@@ -120,7 +120,7 @@ typedef enum{
 } thread_priority_t;
 
 #if defined(_MSC_VER)
-#include <intrin.h>
+	#include <intrin.h>
 #endif
 
 // Memory barrier flags. These can be used with `thread_memory_barrier` to create custom memory barriers with specific ordering constraints, or with `static_memory_barrier` for compiler-only barriers. The `mb_acquire`, `mb_release`, `mb_acq_rel` and `mb_seq_cst` flags are provided for convenience and are equivalent to the corresponding C11 memory orders. The other flags can be used to create more fine-grained barriers.
@@ -140,10 +140,13 @@ typedef enum memory_barrier_t{
 	mb_acquire = 3, // `memory_order_acquire` is equivalent to `mb_read_any`. This enum exists for convenience
 	// mb_consume = 3,
 	mb_release = 10, // `memory_order_release` is equivalent to `mb_any_write`. This enum exists for convenience
-	mb_acq_rel = 11, // `memory_order_acq_rel` is equivalent to `mb_read_any | mb_any_write`. Note the absence of `mb_write_read`, which not even acq_rel provides. This enum exists for convenience
+	mb_acq_rel = 11, // `memory_order_acq_rel` is equivalent to `mb_read_any | mb_any_write`. Note the absence of `mb_write_read`, which acq/rel semanrics do not actually provide. This enum exists for convenience
 	mb_co_acquire = 12, // Acquire semantics with respect to a write instead of a read, equivalent to `mb_write_any`
 	mb_co_release = 5, // Release semantics with respect to a read instead of a write, equivalent to `mb_any_read`
 	mb_co_acq_rel = 13, // See `mb_co_acquire` and `mb_co_release`. Equivalent to `mb_write_any | mb_any_read`. Note the absence of `mb_read_write`. This enum exists for convenience
+	mb_acq_co_rel = 7, // See `mb_acquire` and `mb_co_release`. Equivalent to `mb_read_any | mb_any_read`. Note the absence of `mb_write_write`. This enum exists for convenience
+	mb_rel_co_acq = 14, // See `mb_release` and `mb_co_acquire`. Equivalent to `mb_write_any | mb_any_write`. Note the absence of `mb_read_read`. This enum exists for convenience
+	mb_complete = 15, // Equivalent to `mb_any_any`. This ordering is guaranteed to be a superset of all C11 memory orderings and complementary orderings except seq_cst (i.e it guarantees no single total ordering). This enum exists for convenience
 	mb_seq_cst = 31, // `memory_order_seq_cst` is equivalent to `mb_any_any | mb_total_order`. This enum exists for convenience
 } memory_barrier_t;
 
@@ -154,106 +157,105 @@ static inline void thread_memory_barrier(memory_barrier_t flags);
 static inline void thread_relax(void);
 
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-// Thread speculation fences are available on modern x86 CPUs using the `mfence` instruction, whose semantics were modified in light of speculative execution side-channel attacks revealed circa 2018. This macro signals the availability of the `thread_speculation_fence` function, which provides an interface to this instruction.
-#define THREAD_SPECULATION_FENCE_AVAILABLE
-#if defined(_MSC_VER)
-static inline void thread_relax(void){ _mm_pause(); }
-// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
-static inline void thread_speculation_fence(void){ _mm_lfence(); }
-#else
-static inline void thread_relax(void){ __builtin_ia32_pause(); }
-// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
-static inline void thread_speculation_fence(void){ __builtin_ia32_lfence(); }
-#endif
-// In 2026 all major compilers have reasonable implementations (e.g `lock or` trick on clang or `lock inc` a temp on MSVC)
-static inline void thread_memory_barrier(memory_barrier_t flags){
-	if(flags&20) atomic_thread_fence(memory_order_seq_cst);
-}
+	// Thread speculation fences are available on modern x86 CPUs using the `mfence` instruction, whose semantics were modified in light of speculative execution side-channel attacks revealed circa 2018. This macro signals the availability of the `thread_speculation_fence` function, which provides an interface to this instruction.
+	#define THREAD_SPECULATION_FENCE_AVAILABLE
+	#if defined(_MSC_VER)
+		static inline void thread_relax(void){ _mm_pause(); }
+		// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
+		static inline void thread_speculation_fence(void){ _mm_lfence(); }
+	#else
+		static inline void thread_relax(void){ __builtin_ia32_pause(); }
+		// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
+		static inline void thread_speculation_fence(void){ __builtin_ia32_lfence(); }
+	#endif
+	// In 2026 all major compilers have reasonable implementations (e.g `lock or` trick on clang or `lock inc` a temp on MSVC)
+	static inline void thread_memory_barrier(memory_barrier_t flags){
+		if(flags&20) atomic_thread_fence(memory_order_seq_cst);
+	}
 #elif defined(__aarch64__) || defined(__arm__) || defined(_M_ARM64) || defined(_M_ARM)
-#if defined(__has_include)
-#if __has_include(<arm_acle.h>)
-#include <arm_acle.h>
-#endif
-#endif
+	#if defined(__has_include)
+		#if __has_include(<arm_acle.h>)
+			#include <arm_acle.h>
+		#endif
+	#endif
 
-#ifdef _MSC_VER
-#include <intrin.h>
-static inline void thread_relax(void){ __yield(); }
-static inline void thread_memory_barrier(memory_barrier_t flags){
-	if(flags&16){ atomic_thread_fence(memory_order_seq_cst); return; }
-	if(flags&3){
-		if(flags&12){ atomic_thread_fence(flags&4 ? memory_order_seq_cst : flags&1 ? memory_order_acq_rel : memory_order_release); return; }
-		atomic_thread_fence(memory_order_acquire);
-	}else if(flags&4){
-		__dmb(_ARM64_BARRIER_ISHST);
-		_ReadWriteBarrier();
-	}else if(flags&8){
-		__dmb(_ARM64_BARRIER_ISHST);
-		atomic_signal_fence(memory_order_release);
-	}
-}
-#else
-static inline void thread_relax(void){  __asm__ __volatile__("yield"); }
+	#ifdef _MSC_VER
+		#include <intrin.h>
+		static inline void thread_relax(void){ __yield(); }
+		static inline void thread_memory_barrier(memory_barrier_t flags){
+			if(flags&16){ atomic_thread_fence(memory_order_seq_cst); return; }
+			if(flags&3){
+				if(flags&12){ atomic_thread_fence(flags&4 ? memory_order_seq_cst : flags&1 ? memory_order_acq_rel : memory_order_release); return; }
+				atomic_thread_fence(memory_order_acquire);
+			}else if(flags&4){
+				__dmb(_ARM64_BARRIER_ISHST);
+				_ReadWriteBarrier();
+			}else if(flags&8){
+				__dmb(_ARM64_BARRIER_ISHST);
+				atomic_signal_fence(memory_order_release);
+			}
+		}
+	#else
+		static inline void thread_relax(void){  __asm__ __volatile__("yield"); }
 
-static inline void thread_memory_barrier(memory_barrier_t flags){
-	if(flags&16){ atomic_thread_fence(memory_order_seq_cst); return; }
-	if(flags&3){
-		if(flags&12){ atomic_thread_fence(flags&4 ? memory_order_seq_cst : flags&1 ? memory_order_acq_rel : memory_order_release); return; }
-		atomic_thread_fence(memory_order_acquire);
-#if defined(__ARM_ARCH) && __ARM_ARCH >= 7
-	}else if(flags&4) __asm__ __volatile__("dmb ishst" ::: "memory");
-	else if(flags&8){
-		__asm__ __volatile__("dmb ishst");
-		atomic_signal_fence(memory_order_release);
-#else
-	}else if(flags&4) atomic_thread_fence(memory_order_seq_cst);
-	else if(flags&8){
-		atomic_thread_fence(memory_order_release);
-#endif
-	}
-}
-#if defined(__ARM_ARCH) && __ARM_ARCH >= 8
-// Thread speculation fences are available on modern ARM-based CPUs using the `csdb` instruction, which was specifically introduced in light of speculative execution side-channel attacks revealed circa 2018. This macro signals the availability of the `thread_speculation_fence` function, which provides an interface to this instruction.
-#define THREAD_SPECULATION_FENCE_AVAILABLE
-// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
-static inline void thread_speculation_fence(void){ __asm__ __volatile__("csdb" ::: "memory"); }
-#endif
-#endif
-
+		static inline void thread_memory_barrier(memory_barrier_t flags){
+			if(flags&16){ atomic_thread_fence(memory_order_seq_cst); return; }
+			if(flags&3){
+				if(flags&12){ atomic_thread_fence(flags&4 ? memory_order_seq_cst : flags&1 ? memory_order_acq_rel : memory_order_release); return; }
+				atomic_thread_fence(memory_order_acquire);
+		#if defined(__ARM_ARCH) && __ARM_ARCH >= 7
+			}else if(flags&4) __asm__ __volatile__("dmb ishst" ::: "memory");
+			else if(flags&8){
+				__asm__ __volatile__("dmb ishst");
+				atomic_signal_fence(memory_order_release);
+		#else
+			}else if(flags&4) atomic_thread_fence(memory_order_seq_cst);
+			else if(flags&8){
+				atomic_thread_fence(memory_order_release);
+		#endif
+			}
+		}
+		#if defined(__ARM_ARCH) && __ARM_ARCH >= 8
+			// Thread speculation fences are available on modern ARM-based CPUs using the `csdb` instruction, which was specifically introduced in light of speculative execution side-channel attacks revealed circa 2018. This macro signals the availability of the `thread_speculation_fence` function, which provides an interface to this instruction.
+			#define THREAD_SPECULATION_FENCE_AVAILABLE
+			// See the macro `THREAD_SPECULATION_FENCE_AVAILABLE`
+			static inline void thread_speculation_fence(void){ __asm__ __volatile__("csdb" ::: "memory"); }
+		#endif
+	#endif
 #elif defined(__riscv)
-#if defined(__riscv_zihintpause)
-static inline void thread_relax(void){ __asm__ __volatile__("pause"); }
-#else
-static inline void thread_relax(void){ __asm__ __volatile__("nop"); }
-#endif
-static inline void thread_memory_barrier(memory_barrier_t flags){
-	switch((int)flags){
-		case 0: break;
-#define _A_FENCE_TYPE(n, asm) case n: __asm__ __volatile__(asm); break;
-		_A_FENCE_TYPE(1, "fence r, r")
-		_A_FENCE_TYPE(2, "fence r, w")
-		_A_FENCE_TYPE(3, "fence r, rw")
-		_A_FENCE_TYPE(4, "fence w, r")
-		_A_FENCE_TYPE(5, "fence rw, r")
-		_A_FENCE_TYPE(6, "fence w, r; fence r, w")
-		_A_FENCE_TYPE(7, "fence w, r; fence r, rw")
-		_A_FENCE_TYPE(8, "fence w, w")
-		_A_FENCE_TYPE(9, "fence w, w; fence r, r")
-		_A_FENCE_TYPE(10, "fence rw, w")
-		_A_FENCE_TYPE(11, "fence rw, w; fence r, r")
-		_A_FENCE_TYPE(12, "fence w, rw")
-		_A_FENCE_TYPE(13, "fence w, rw; fence r, r")
-		_A_FENCE_TYPE(14, "fence rw, w; fence w, r")
-#undef _A_FENCE_TYPE
-		default: __asm__ __volatile__("fence rw, rw");
+	#if defined(__riscv_zihintpause)
+		static inline void thread_relax(void){ __asm__ __volatile__("pause"); }
+	#else
+		static inline void thread_relax(void){ __asm__ __volatile__("nop"); }
+	#endif
+	static inline void thread_memory_barrier(memory_barrier_t flags){
+		switch((int)flags){
+			case 0: break;
+	#define _A_FENCE_TYPE(n, asm) case n: __asm__ __volatile__(asm); break;
+			_A_FENCE_TYPE(1, "fence r, r")
+			_A_FENCE_TYPE(2, "fence r, w")
+			_A_FENCE_TYPE(3, "fence r, rw")
+			_A_FENCE_TYPE(4, "fence w, r")
+			_A_FENCE_TYPE(5, "fence rw, r")
+			_A_FENCE_TYPE(6, "fence w, r; fence r, w")
+			_A_FENCE_TYPE(7, "fence w, r; fence r, rw")
+			_A_FENCE_TYPE(8, "fence w, w")
+			_A_FENCE_TYPE(9, "fence w, w; fence r, r")
+			_A_FENCE_TYPE(10, "fence rw, w")
+			_A_FENCE_TYPE(11, "fence rw, w; fence r, r")
+			_A_FENCE_TYPE(12, "fence w, rw")
+			_A_FENCE_TYPE(13, "fence w, rw; fence r, r")
+			_A_FENCE_TYPE(14, "fence rw, w; fence w, r")
+	#undef _A_FENCE_TYPE
+			default: __asm__ __volatile__("fence rw, rw");
+		}
+		atomic_signal_fence((flags&~3) == 0 ? flags ? memory_order_acquire : memory_order_relaxed : (flags&~3) == 8 ? flags&1 ? memory_order_acq_rel : memory_order_release : memory_order_seq_cst);
 	}
-	atomic_signal_fence((flags&~3) == 0 ? flags ? memory_order_acquire : memory_order_relaxed : (flags&~3) == 8 ? flags&1 ? memory_order_acq_rel : memory_order_release : memory_order_seq_cst);
-}
 #else
-static inline void thread_relax(void){ __asm__ __volatile__("nop"); }
-static inline void thread_memory_barrier(memory_barrier_t flags){
-	atomic_thread_fence((flags&~3) == 0 ? flags ? memory_order_acquire : memory_order_relaxed : (flags&~3) == 8 ? flags&1 ? memory_order_acq_rel : memory_order_release : memory_order_seq_cst);
-}
+	static inline void thread_relax(void){ __asm__ __volatile__("nop"); }
+	static inline void thread_memory_barrier(memory_barrier_t flags){
+		atomic_thread_fence((flags&~3) == 0 ? flags ? memory_order_acquire : memory_order_relaxed : (flags&~3) == 8 ? flags&1 ? memory_order_acq_rel : memory_order_release : memory_order_seq_cst);
+	}
 #endif
 
 // `thread_memory_barrier` is a more flexible version of `atomic_signal_fence`. It accepts any combination of the flags defined by the `memory_barrier_t` enum (OR'd together) to create a compiletime-only memory barrier with specific ordering constraints. The exact implementation of the barrier is platform-specific, and may be a superset of the specified constraints.
@@ -262,12 +264,12 @@ static inline void static_memory_barrier(memory_barrier_t flags){
 }
 
 #ifndef A_H_DEFAULT_SPIN
-// Try to thread_relax() this many times while waiting on an atomic.
-#define A_H_DEFAULT_SPIN 48
+	// Try to thread_relax() this many times while waiting on an atomic.
+	#define A_H_DEFAULT_SPIN 48
 #endif
 #ifndef A_H_DEFAULT_YIELD
-// Try to thread_yield() this many times while waiting on an atomic.
-#define A_H_DEFAULT_YIELD 6
+	// Try to thread_yield() this many times while waiting on an atomic.
+	#define A_H_DEFAULT_YIELD 6
 #endif
 // After this many spin/yield, we use a thread parking loop: SYS_futex on Linux, futex() on FreeBSD, _umtx_op on OpenBSD, SYS_ulock_* on MacOS, and WaitOnAddress/WakeByAddress* on Windows
 // SYS_ulock_* is technically unstable on Mac, although unlikely to go away or change any time soon
@@ -363,7 +365,7 @@ static inline void _atomic_waitloop32(_Atomic uint32_t* addr, uint32_t val, memo
 static inline void _atomic_waitloop64(_Atomic uint64_t* addr, uint64_t val, memory_order o){ _atomic_futex_loop(addr, val, check: WaitOnAddress((void*) addr, &val, 8, INFINITE), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o); }
 
 static inline void _atomic_wait_ptr(void* a_, void* b_){ WaitOnAddress(a_, &b_, sizeof(void*), INFINITE); }
-static inline void _atomic_waitloop_ptr(void* a_, void* b_, memory_order o){ _Atomic uintptr_t* addr = (_Atomic uintptr_t*)a_; uintptr_t val = (uintptr_t)b_; _atomic_futex_loop(addr, val, check: WaitOnAddress((void*) addr, &val, sizeof(uintptr_t), INFINITE), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o); }
+static inline void _atomic_waitloop_ptr(void* a_, void* val, memory_order o){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_loop(addr, val, check: WaitOnAddress(a_, &val, sizeof(void*), INFINITE), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o); }
 
 // Notify an `atomic_wait` that the value may have changed
 // This will wake one or more threads waiting on the given address. `n` is the number of threads to wake, or `-1` to wake all threads. The implementation may wake more threads than requested, but will never wake fewer threads than requested or are waiting.
@@ -386,26 +388,27 @@ struct _thread_t{
 
 static inline size_t available_concurrency(void){ DWORD n = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS); return n <= 0 ? 1 : n; }
 
-static _Thread_local thread_t _a_thread_self = (thread_t)-1;
-static _Thread_local uint8_t _a_park_flag = 0;
+_Thread_local thread_t _a_thread_self = (thread_t)-1;
+_Thread_local _Atomic uint8_t _a_park_flag = 0;
 
 static inline DWORD WINAPI _thread_wrapper(void* a_){
 	struct _thread_t* a = _a_thread_self = (struct _thread_t*)a_;
 	a->arg = a->fn(a->arg);
-	HANDLE h = atomic_exchange_explicit(&a->_handle, 0, memory_order_release);
+	HANDLE h = atomic_exchange_explicit(&a->_handle, 0, memory_order_acq_rel);
 	if(h) CloseHandle(h);
 	else free(a);
 	return 0;
 }
 
 static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack){
-	HANDLE h;
+	HANDLE h = CreateThread(NULL, stack, _thread_wrapper, t, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, NULL);
+	if(!h) return 0;
 	struct _thread_t* t = (struct _thread_t*) malloc(sizeof(struct _thread_t));
 	t->fn = fn;
 	t->arg = arg;
+	atomic_init(&t->_handle, h);
 	atomic_thread_fence(memory_order_release);
-	t->_handle = CreateThread(NULL, stack, _thread_wrapper, t, 0, NULL);
-	if(t->_handle == INVALID_HANDLE_VALUE){ free(t); return 0; }
+	ResumeThread(h);
 	return t;
 }
 
@@ -420,7 +423,7 @@ static inline void* thread_join(thread_t t){
 	return ret;
 }
 static inline void thread_detach(thread_t t){
-	HANDLE h = atomic_exchange_explicit(&t->_handle, 0, memory_order_relaxed);
+	HANDLE h = atomic_exchange_explicit(&t->_handle, 0, memory_order_acquire);
 	if(h){ CloseHandle(h); }
 	else free(t);
 }
@@ -448,21 +451,23 @@ static inline wait_t thread_wait_token(){
 static inline void thread_wait(wait_t v){
 	uint8_t zero = 0;
 	WaitOnAddress((uint8_t*)v, &zero, 1, INFINITE);
-	*(uint8_t*)v = 0;
+	atomic_store_explicit((_Atomic uint8_t*)v, 0, memory_order_release);
 }
 static inline void thread_wake(wait_t v){
-	*(uint8_t*)v = 1;
+	atomic_store_explicit((_Atomic uint8_t*)v, 1, memory_order_release);
 	WakeByAddressSingle((uint8_t*)v);
 }
 
 static inline uint64_t mono_now(void){
-	static double pfreq = -1;
+	static _Atomic double pfreq_ = -1;
 	LARGE_INTEGER counter;
 	QueryPerformanceCounter(&counter);
+	double pfreq = atomic_load_explicit(&pfreq_, memory_order_relaxed);
 	if(pfreq < 0){
 		LARGE_INTEGER f;
 		QueryPerformanceFrequency(&f);
 		pfreq = (double)SECOND_US / (double)f.QuadPart;
+		atomic_store_explicit(&pfreq_, pfreq, memory_order_relaxed);
 	}
 	return (uint64_t)(counter.QuadPart * pfreq);
 }
@@ -492,12 +497,12 @@ static inline uint64_t thread_now(void){
 #include <sched.h>
 #include <unistd.h>
 #ifdef __linux__
-#include <linux/futex.h>
+	#include <linux/futex.h>
 #elif defined(__OpenBSD__)
-#include <sys/time.h>
-#include <sys/futex.h>
+	#include <sys/time.h>
+	#include <sys/futex.h>
 #elif defined(__FreeBSD__)
-#include <sys/umtx.h>
+	#include <sys/umtx.h>
 #endif
 #include <sys/syscall.h>
 #include <limits.h>
@@ -506,79 +511,79 @@ static inline uint64_t thread_now(void){
 
 #ifdef __linux__
 
-// Note on _atomic_futex_small:
-// Every 8 bit value is inside some aligned 32 bit value that doesn't cross a page boundary, same for 16 bit
-// C standard might say loading this 32 bit value is UB and to that I say BITE ME
-// We use volatile here to break the compiler's assumptions about memory
-// This does not "fix" the UB, but does make the UB mostly non-actionable to the compiler in practice
-// If you sacrifice performance for "idiomatic correctness" you are a sucker and PRs as such will not be accepted
-// We use bitset to guarantee that wake ops will wakes the correct thread, even if multiple threads are waiting
-//   on the same 32 bit word but different 8/16 bit portions of that word
+	// Note on _atomic_futex_small:
+	// Every 8 bit value is inside some aligned 32 bit value that doesn't cross a page boundary, same for 16 bit
+	// C standard might say loading this 32 bit value is UB and to that I say BITE ME
+	// We use volatile here to break the compiler's assumptions about memory
+	// This does not "fix" the UB, but does make the UB mostly non-actionable to the compiler in practice
+	// If you sacrifice performance for "idiomatic correctness" you are a sucker and PRs as such will not be accepted
+	// We use bitset to guarantee that wake ops will wakes the correct thread, even if multiple threads are waiting
+	//   on the same 32 bit word but different 8/16 bit portions of that word
 
-// _atomic_futex32 is just normal futexes
-// _atomic_futex64 has to be emulated via a waiter pool: each "waiter" tracks the wake "generation" to avoid lost wakes between the check and the actual syscall
-//   (this only breaks if there have been exactly 2^32 wakes between the check and the syscall which is virtually impossible in practice)
-// _atomic_futex64 also makes use of bitset to reduce unnecessary wakeups (from 1-in-32 to 1-in-1024)
-// The exact same algorithm used by _atomic_futex64 can be used to implement wait for arbitrary sizes or conditions
+	// _atomic_futex32 is just normal futexes
+	// _atomic_futex64 has to be emulated via a waiter pool: each "waiter" tracks the wake "generation" to avoid lost wakes between the check and the actual syscall
+	//   (this only breaks if there have been exactly 2^32 wakes between the check and the syscall which is virtually impossible in practice)
+	// _atomic_futex64 also makes use of bitset to reduce unnecessary wakeups (from 1-in-32 to 1-in-1024)
+	// The exact same algorithm used by _atomic_futex64 can be used to implement wait for arbitrary sizes or conditions
 
-#define _atomic_futex_wake_small(addr, n) int off = ((uintptr_t)addr)&3; \
-	syscall(SYS_futex, (char*)addr-off, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1<<(off<<3))
-#define _atomic_futex_wake32(addr, n) syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, n, 0, 0)
-#define _atomic_futex_wake64(addr, n) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
-	atomic_fetch_add_explicit(fut, 1, memory_order_release); \
-	syscall(SYS_futex, fut, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1u<<(((uintptr_t)addr>>8)&31));
-#define _atomic_futex_small(addr, val, m, check) int off = ((uintptr_t)addr)&3; \
-	void* addr2 = (char*)addr-off; off <<= 3; \
-	check {\
-	uint32_t v = atomic_load_explicit((volatile _Atomic uint32_t*) addr2, memory_order_relaxed); \
-	uint32_t v2 = v&m | val<<off; \
-	if(v != v2) return; \
-	syscall(SYS_futex, addr2, FUTEX_WAIT_BITSET_PRIVATE, v, 0, 0, 1<<off); }
-#define _atomic_futex32(addr, val) syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, val, 0, 0)
-#define _atomic_futex64(addr, val, check) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
-	uint32_t tok = atomic_load_explicit(fut, memory_order_acquire); \
-	if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
-	uint32_t m = 1u<<(((uintptr_t)addr>>8)&31); \
-	check { \
-	syscall(SYS_futex, fut, FUTEX_WAIT_BITSET_PRIVATE, tok, 0, 0, m); \
-	if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
-	uint32_t tok2 = tok; if(tok2 == (tok=atomic_load_explicit(fut, memory_order_relaxed))) return; \
-	syscall(SYS_futex, fut, FUTEX_WAKE_BITSET_PRIVATE, INT_MAX, 0, 0, m); }
+	#define _atomic_futex_wake_small(addr, n) int off = ((uintptr_t)addr)&3; \
+		syscall(SYS_futex, (char*)addr-off, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1<<(off<<3))
+	#define _atomic_futex_wake32(addr, n) syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, n, 0, 0)
+	#define _atomic_futex_wake64(addr, n) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
+		atomic_fetch_add_explicit(fut, 1, memory_order_release); \
+		syscall(SYS_futex, fut, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1u<<(((uintptr_t)addr>>8)&31));
+	#define _atomic_futex_small(addr, val, m, check) int off = ((uintptr_t)addr)&3; \
+		void* addr2 = (char*)addr-off; off <<= 3; \
+		check {\
+		uint32_t v = atomic_load_explicit((volatile _Atomic uint32_t*) addr2, memory_order_relaxed); \
+		uint32_t v2 = v&m | (uint32_t)(val)<<off; \
+		if(v != v2) return; \
+		syscall(SYS_futex, addr2, FUTEX_WAIT_BITSET_PRIVATE, v, 0, 0, 1<<off); }
+	#define _atomic_futex32(addr, val) syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, (uint32_t)(val), 0, 0)
+	#define _atomic_futex64(addr, val, check) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
+		uint32_t tok = atomic_load_explicit(fut, memory_order_acquire); \
+		if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
+		uint32_t m = 1u<<(((uintptr_t)addr>>8)&31); \
+		check { \
+		syscall(SYS_futex, fut, FUTEX_WAIT_BITSET_PRIVATE, tok, 0, 0, m); \
+		if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
+		uint32_t tok2 = tok; if(tok2 == (tok=atomic_load_explicit(fut, memory_order_relaxed))) return; \
+		syscall(SYS_futex, fut, FUTEX_WAKE_BITSET_PRIVATE, INT_MAX, 0, 0, m); }
 
 #elif defined(__OpenBSD__)
 
-#define _atomic_futex32(addr, val) \
-	futex((volatile uint32_t*)(addr), FUTEX_WAIT, (int)(val), NULL, NULL)
+	#define _atomic_futex32(addr, val) \
+		futex((volatile uint32_t*)(addr), FUTEX_WAIT, (int)(val), NULL, NULL)
 
-#define _atomic_futex_wake32(addr, n) \
-	futex((volatile uint32_t*)(addr), FUTEX_WAKE, (int)(n), NULL, NULL)
+	#define _atomic_futex_wake32(addr, n) \
+		futex((volatile uint32_t*)(addr), FUTEX_WAKE, (int)(n), NULL, NULL)
 
 #elif defined(__FreeBSD__)
 
-#define _atomic_futex32(addr, val) \
-	_umtx_op(addr, UMTX_OP_WAIT_UINT_PRIVATE, val, 0, 0)
+	#define _atomic_futex32(addr, val) \
+		_umtx_op(addr, UMTX_OP_WAIT_UINT_PRIVATE, (uint32_t)(val), 0, 0)
 
-#define _atomic_futex_wake32(addr, n) \
-	_umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
+	#define _atomic_futex_wake32(addr, n) \
+		_umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
 
-#elif defined(__APPLE__) && !defined(APPLE_NO_UNSTABLE_ULOCK)
+	#elif defined(__APPLE__) && !defined(APPLE_NO_UNSTABLE_ULOCK)
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	#pragma clang diagnostic push
+	#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-#define _atomic_futex32(addr, val) \
-	syscall(SYS_ulock_wait, 0x1000001, addr, val, 0)
+	#define _atomic_futex32(addr, val) \
+		syscall(SYS_ulock_wait, 0x1000001, addr, (uint32_t)(val), 0)
 
-#define _atomic_futex_wake32(addr, n) \
-	syscall(SYS_ulock_wake, 0x1000001, addr, n)
+	#define _atomic_futex_wake32(addr, n) \
+		syscall(SYS_ulock_wake, 0x1000001, addr, n)
 
 #else
 
-// Fallback
-#warning "No futex-like primitive found (falling back to yield-loop)"
-#define _A_FUTEX_FALLBACK
-#define _atomic_futex32(addr, val) sched_yield()
-#define _atomic_futex_wake32(addr, n) {}
+	// Fallback
+	#warning "No futex-like primitive found (falling back to yield-loop)"
+	#define _A_FUTEX_FALLBACK
+	#define _atomic_futex32(addr, val) sched_yield()
+	#define _atomic_futex_wake32(addr, n) {}
 
 #endif
 
@@ -590,10 +595,10 @@ static inline uint64_t thread_now(void){
 
 #ifdef _A_FUTEX_FALLBACK
 
-#define _atomic_futex_small(addr, val, m, check) sched_yield()
-#define _atomic_futex_wake_small(addr, n) {}
-#define _atomic_futex64(addr, val, _) sched_yield()
-#define _atomic_futex_wake64(addr, n) {}
+	#define _atomic_futex_small(addr, val, m, check) sched_yield()
+	#define _atomic_futex_wake_small(addr, n) {}
+	#define _atomic_futex64(addr, val, _) sched_yield()
+	#define _atomic_futex_wake64(addr, n) {}
 
 #elif !defined(__linux__)
 
@@ -612,7 +617,7 @@ static inline uint64_t thread_now(void){
 
 	#if ULONG_MAX == UINT64_MAX && defined(__FreeBSD__)
 		#define _atomic_futex_wake64(addr, n) _umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
-		#define _atomic_futex64(addr, val, _) _umtx_op(addr, UMTX_OP_WAIT_PRIVATE, val, 0, 0)
+		#define _atomic_futex64(addr, val, _) _umtx_op(addr, UMTX_OP_WAIT_PRIVATE, (uint64_t)(val), 0, 0)
 	#else
 		#define _atomic_futex_wake64(addr, n) _Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr>>3)^((uintptr_t)addr>>8))&31]; \
 			atomic_fetch_add_explicit(fut, 1, memory_order_release); \
@@ -628,6 +633,7 @@ static inline uint64_t thread_now(void){
 	#endif
 
 #endif
+
 static inline void _atomic_wait8(void* addr, uint8_t val){ _atomic_futex_small(addr, val, ~(255u<<off), ) }
 static inline void _atomic_wait16(_Atomic uint16_t* addr, uint16_t val){ _atomic_futex_small(addr, val, (0xFFFF0000u>>off), ) }
 static inline void _atomic_wait32(_Atomic uint32_t* addr, uint32_t val){ _atomic_futex32(addr, val); }
@@ -642,14 +648,14 @@ static inline void _atomic_wake32(void* addr, int n){ _atomic_futex_wake32(addr,
 static inline void _atomic_wake64(void* addr, int n){ _atomic_futex_wake64(addr, n); }
 
 #if UINTPTR_MAX == UINT64_MAX
-static inline void _atomic_wait_ptr(void* a_, void* b_){ _Atomic uint64_t* addr = (_Atomic uint64_t*)a_; uint64_t val = (uint64_t)b_; _atomic_futex64(addr, val, ) }
-static inline void _atomic_waitloop_ptr(void* a_, void* b_, memory_order o){ _Atomic uint64_t* addr = (_Atomic uint64_t*)a_; uint64_t val = (uint64_t)b_; _atomic_futex_loop(addr, val, _atomic_futex64(addr, val, check:), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
-#define _atomic_wake_arch _atomic_wake64
+	#define _atomic_futex_arch _atomic_futex64
+	#define _atomic_wake_arch _atomic_wake64
 #else
-static inline void _atomic_wait_ptr(void* a_, void* b_){ _atomic_futex32(((_Atomic uint32_t*)a_), ((uint32_t)b_)); }
-static inline void _atomic_waitloop_ptr(void* a_, void* b_, memory_order o){ _Atomic uint32_t* addr = a_; uint32_t val = (uint32_t)b_; _atomic_futex_loop(addr, val, check: _atomic_futex32(addr, val), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
-#define _atomic_wake_arch _atomic_wake32
+	#define _atomic_futex_arch _atomic_futex32
+	#define _atomic_wake_arch _atomic_wake32
 #endif
+static inline void _atomic_wait_ptr(void* a_, void* val){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_arch(addr, val, ) }
+static inline void _atomic_waitloop_ptr(void* a_, void* val, memory_order o){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_loop(addr, val, _atomic_futex_arch(addr, val, check:), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
 
 // Notify an `atomic_wait` that the value may have changed
 // This will wake one or more threads waiting on the given address. `n` is the number of threads to wake, or `-1` to wake all threads. The implementation may wake more threads than requested, but will never wake fewer threads than requested or are waiting.
@@ -692,31 +698,31 @@ static inline void* thread_join(thread_t t){ void* res; pthread_join(t, &res); r
 
 #if defined(__NetBSD__) || defined(__sun)
 
-static inline wait_t thread_wait_token(){ return _lwp_self(); }
-static inline void thread_wait(wait_t token){
-	// Useless arguments
-#ifdef __sun
-	_lwp_park(0, 0, 0, 0);
-#else
-	_lwp_park(0, 0, 0, 0, 0, 0);
-#endif
-}
-static inline void thread_wake(wait_t token){ _lwp_unpark(token, 0); }
+	static inline wait_t thread_wait_token(){ return _lwp_self(); }
+	static inline void thread_wait(wait_t token){
+		// Useless arguments
+	#ifdef __sun
+		_lwp_park(0, 0, 0, 0);
+	#else
+		_lwp_park(0, 0, 0, 0, 0, 0);
+	#endif
+	}
+	static inline void thread_wake(wait_t token){ _lwp_unpark(token, 0); }
 
 #else
 
-static _Thread_local uint32_t _a_park_flag = 0;
-static inline wait_t thread_wait_token(){
-	return (uintptr_t)&_a_park_flag;
-}
-static inline void thread_wait(wait_t v){
-	_atomic_futex32((uint32_t*)v, 0);
-	*(uint32_t*)v = 0;
-}
-static inline void thread_wake(wait_t v){
-	*(uint32_t*)v = 1;
-	_atomic_wake32(v, 1);
-}
+	_Thread_local _Atomic uint32_t _a_park_flag = 0;
+	static inline wait_t thread_wait_token(){
+		return (uintptr_t)&_a_park_flag;
+	}
+	static inline void thread_wait(wait_t v){
+		_atomic_futex32((uint32_t*)v, 0);
+		atomic_store_explicit((_Atomic uint32_t*)v, 0, memory_order_release);
+	}
+	static inline void thread_wake(wait_t v){
+		atomic_store_explicit((_Atomic uint32_t*)v, 1, memory_order_release);
+		_atomic_wake32((uint32_t*)v, 1);
+	}
 
 #endif
 
@@ -761,7 +767,7 @@ static inline uint64_t thread_now(void){
 	return (uint64_t)(ts.tv_nsec/1000) + SECOND_US*(uint64_t)ts.tv_sec;
 }
 
-#endif
+#endif // WIN32 / POSIX-like
 
 typedef _Atomic(ssize_t) atomic_ssize_t;
 
@@ -904,24 +910,58 @@ static inline uint32_t lock_fetch(lock_t* lock){ return atomic_load_explicit(loc
 #define LOCK_MAX 2147483647
 
 #if defined(__APPLE__) && !defined(APPLE_NO_UNSTABLE_ULOCK)
-#pragma clang diagnostic pop
+	#pragma clang diagnostic pop
 #endif
 
 // L1 cache line is 64 bytes almost everywhere
 #ifndef CACHE_LINE
-// Size of a hardware cache line
-// The good: Memory access for data stored on some cache line will typically make access to other data on the same cache line much faster
-// The bad: Memory access for data stored the same cache line by different threads may incur the same contention overhead whether or not their memory regions actually overlap.
-// The ugly: Memory contention and CPU cache is extremely complex, data stored on different (but close) cache lines may still incur some overhead (although usually less than when on the same cache line), and prefetching may cause contention penalty even when a pointer is not dereferenced.
-// You may also redefine this macro before including the header to any power of two
-#define CACHE_LINE 64
+	// Size of a hardware cache line
+	// The good: Memory access for data stored on some cache line will typically make access to other data on the same cache line much faster
+	// The bad: Memory access for data stored the same cache line by different threads may incur the same contention overhead whether or not their memory regions actually overlap.
+	// The ugly: Memory contention and CPU cache is extremely complex, data stored on different (but close) cache lines may still incur some overhead (although usually less than when on the same cache line), and prefetching may cause contention penalty even when a pointer is not dereferenced.
+	// You may also redefine this macro before including the header to any power of two
+	#define CACHE_LINE 64
 #elif (CACHE_LINE)&((CACHE_LINE)-1)
-#error CACHE_LINE must be a power-of-two
+	#error CACHE_LINE must be a power-of-two
 #endif
 
 #ifdef A_H_NODEPRECATE
 #elif defined(__clang__) || defined(__GNUC__)
-__attribute__((deprecated("Did you mean thread_sleep()?"))) unsigned sleep(unsigned);
+	__attribute__((deprecated("Did you mean thread_sleep()?"))) unsigned sleep(unsigned);
 #elif defined(_MSC_VER)
-__declspec(deprecated("Did you mean thread_sleep()?")) unsigned sleep(unsigned);
+	__declspec(deprecated("Did you mean thread_sleep()?")) unsigned sleep(unsigned);
+#endif
+
+#if INT64_MAX <= INT_MAX
+	#define ATOMIC_INT64_LOCK_FREE ATOMIC_INT_LOCK_FREE
+#elif INT64_MAX <= LONG_MAX
+	#define ATOMIC_INT64_LOCK_FREE ATOMIC_LONG_LOCK_FREE
+#else
+	#define ATOMIC_INT64_LOCK_FREE ATOMIC_LLONG_LOCK_FREE
+#endif
+
+#if INT32_MAX <= SHRT_MAX
+	#define ATOMIC_INT32_LOCK_FREE ATOMIC_SHORT_LOCK_FREE
+#elif INT32_MAX <= INT_MAX
+	#define ATOMIC_INT32_LOCK_FREE ATOMIC_INT_LOCK_FREE
+#else
+	#define ATOMIC_INT32_LOCK_FREE ATOMIC_LONG_LOCK_FREE
+#endif
+
+#if INT16_MAX <= CHAR_MAX
+	#define ATOMIC_INT16_LOCK_FREE ATOMIC_CHAR_LOCK_FREE
+#else
+	#define ATOMIC_INT16_LOCK_FREE ATOMIC_SHORT_LOCK_FREE
+#endif
+
+#define ATOMIC_INT8_LOCK_FREE ATOMIC_CHAR_LOCK_FREE
+
+#if SIZE_MAX == UINTPTR_MAX
+	#define ATOMIC_SIZE_LOCK_FREE ATOMIC_POINTER_LOCK_FREE
+#elif SIZE_MAX <= UINT_MAX
+	#define ATOMIC_SIZE_LOCK_FREE ATOMIC_INT_LOCK_FREE
+#elif SIZE_MAX <= ULONG_MAX
+	#define ATOMIC_INT64_LOCK_FREE ATOMIC_LONG_LOCK_FREE
+#else
+	#define ATOMIC_INT64_LOCK_FREE ATOMIC_LLONG_LOCK_FREE
 #endif

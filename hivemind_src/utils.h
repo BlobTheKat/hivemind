@@ -93,7 +93,7 @@ static inline float discrete_log2f(float x){
 
 #if SIZE_MAX == UINT64_MAX
 typedef struct ring_buffer_t{
-	char* data;
+	union{ char* data; char data_i[sizeof(char*)]; };
 	size_t cap_exp:8;
 	size_t l:(sizeof(size_t)*CHAR_BIT)-8; size_t size;
 } ring_buffer_t;
@@ -104,7 +104,7 @@ typedef struct ring_iterator_t{
 static_assert(sizeof(ring_buffer_t) == sizeof(size_t) * 3);
 #else
 typedef struct ring_buffer_t{
-	char* data;
+	union{ char* data; char data_i[sizeof(char*)]; };
 	size_t cap_exp, l, size;
 } ring_buffer_t;
 typedef struct ring_iterator_t{
@@ -126,14 +126,14 @@ noinline char* _ring_buffer_grow(ring_buffer_t* obj, char* dat, size_t* cap, siz
 		memcpy(dat2+(cap_-l), dat, l+size-cap_);
 	}else memcpy(dat2, dat+l, size);
 	obj->l = 0;
-	if(dat!=(char*)&obj->data) free(dat);
+	if(dat!=obj->data_i) free(dat);
 	obj->data = dat2; *cap = cap2;
 	return dat2;
 }
 
 templated size_t ring_buffer_push_garbage(ring_buffer_t* obj, size_t sz, bool _aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, used2 = size+sz;
 	if(_aligned) assert(sz <= cap-(obj->l+size) && !(sz&(sz-1)), "Alignment condition violated");
@@ -145,7 +145,7 @@ templated size_t ring_buffer_push_garbage(ring_buffer_t* obj, size_t sz, bool _a
 
 templated void ring_buffer_push(ring_buffer_t* obj, void* d, size_t sz, bool aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, used2 = size+sz;
 	if(used2 > cap)
@@ -164,7 +164,7 @@ templated void ring_buffer_push(ring_buffer_t* obj, void* d, size_t sz, bool ali
 
 templated void ring_buffer_push_memset(ring_buffer_t* obj, char v, size_t sz, bool aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, used2 = size+sz;
 	if(used2 > cap)
@@ -185,7 +185,7 @@ noinline void _ring_buffer_shrink(ring_buffer_t* obj, char* dat, size_t cap){
 	char* dat2; size_t used2 = obj->size;
 	if(used2 <= sizeof(char*)){
 		obj->cap_exp = 0;
-		dat2 = (char*)&obj->data;
+		dat2 = obj->data_i;
 	}else{
 		dat2 = obj->data = (char*) malloc(1ull<<(int)(obj->cap_exp = size_magn((used2-1)|31)));
 		if unlikely(!dat2) abort();
@@ -201,7 +201,7 @@ noinline void _ring_buffer_shrink(ring_buffer_t* obj, char* dat, size_t cap){
 
 templated void ring_buffer_shift_discard(ring_buffer_t* obj, size_t sz, bool _aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	assert(sz <= obj->size, "Size underflow");
 	obj->l = (obj->l+sz)&(cap-1);
@@ -213,7 +213,7 @@ templated void ring_buffer_shift_discard(ring_buffer_t* obj, size_t sz, bool _al
 
 templated void ring_buffer_shift(ring_buffer_t* obj, void* d, size_t sz, bool aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	assert(sz <= obj->size, "Size underflow");
 	size_t l = obj->l;
@@ -233,7 +233,7 @@ templated void ring_buffer_shift(ring_buffer_t* obj, void* d, size_t sz, bool al
 
 templated void ring_buffer_get(ring_buffer_t* obj, size_t i, void* d, size_t sz, bool aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	assert(i+sz <= obj->size, "Index overflow");
 	size_t r = (obj->l+i)&(cap-1);
@@ -249,7 +249,7 @@ templated void ring_buffer_get(ring_buffer_t* obj, size_t i, void* d, size_t sz,
 
 templated void ring_buffer_set(ring_buffer_t* obj, size_t i, void* d, size_t sz, bool aligned){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	assert(i+sz <= obj->size, "Index overflow");
 	size_t r = (obj->l+i)&(cap-1);
@@ -265,7 +265,7 @@ templated void ring_buffer_set(ring_buffer_t* obj, size_t i, void* d, size_t sz,
 
 static inline ring_iterator_t ring_buffer_iterator(ring_buffer_t* obj, size_t i, size_t count){
 	size_t cap_exp = obj->cap_exp; char* dat;
-	if(!cap_exp) cap_exp = size_magn(sizeof(char*)-1), dat = (char*)&obj->data;
+	if(!cap_exp) cap_exp = size_magn(sizeof(char*)-1), dat = obj->data_i;
 	else dat = obj->data;
 	size_t cap = 1ull<<(int)cap_exp;
 	size_t l = (obj->l+i)&(cap-1); if(count > obj->size-i) count = obj->size-i;
@@ -308,13 +308,13 @@ templated void ring_buffer_destroy(ring_buffer_t* obj){
 
 #if SIZE_MAX == UINT64_MAX
 typedef struct array_buffer_t{
-	char* data;
+	union{ char* data; char data_i[sizeof(char*)]; };
 	size_t cap_exp:8, size:(sizeof(size_t)*CHAR_BIT)-8;
 } array_buffer_t;
 static_assert(sizeof(array_buffer_t) == sizeof(size_t) * 2);
 #else
 typedef struct array_buffer_t{
-	char* data;
+	union{ char* data; char data_i[sizeof(char*)]; };
 	size_t cap_exp, size;
 } array_buffer_t;
 static_assert(sizeof(array_buffer_t) == sizeof(size_t) * 3);
@@ -324,20 +324,20 @@ typedef struct array_iterator_t{
 } array_iterator_t;
 
 templated size_t array_buffer_size(array_buffer_t* obj){ return obj->size; }
-templated void* array_buffer_data(array_buffer_t* obj){ return obj->cap_exp?obj->data:(char*)&obj->data; }
+templated void* array_buffer_data(array_buffer_t* obj){ return obj->cap_exp?obj->data:obj->data_i; }
 
 noinline char* _array_buffer_grow(array_buffer_t* obj, char* dat, size_t* cap, size_t used2){
 	char* dat2 = (char*) malloc(*cap = 1ull<<(int)(obj->cap_exp = size_magn((used2-1)|31)));
 	if unlikely(!dat2) abort();
 	memcpy(dat2, dat, obj->size);
-	if(dat!=(char*)&obj->data) free(dat);
+	if(dat!=obj->data_i) free(dat);
 	obj->data = dat2;
 	return dat2;
 }
 
 templated void* array_buffer_push_garbage(array_buffer_t* obj, size_t sz){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, used2 = size+sz;
 	if(used2 > cap)
@@ -348,7 +348,7 @@ templated void* array_buffer_push_garbage(array_buffer_t* obj, size_t sz){
 
 templated void array_buffer_push(array_buffer_t* obj, void* d, size_t sz){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, len2 = size+sz;
 	if(len2 > cap)
@@ -359,7 +359,7 @@ templated void array_buffer_push(array_buffer_t* obj, void* d, size_t sz){
 
 templated void array_buffer_push_memset(array_buffer_t* obj, int v, size_t sz){
 	size_t cap = obj->cap_exp; char* dat;
-	if(!cap) cap = sizeof(char*), dat = (char*)&obj->data;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
 	else cap = 1ull<<(int)cap, dat = obj->data;
 	size_t size = obj->size, len2 = size+sz;
 	if(len2 > cap)
@@ -373,7 +373,7 @@ noinline void _array_buffer_shrink(array_buffer_t* obj){
 	char* dat = obj->data;
 	if(used2 <= sizeof(char*)){
 		obj->cap_exp = 0;
-		dat2 = (char*)&obj->data;
+		dat2 = obj->data_i;
 	}else{
 		dat2 = obj->data = (char*) malloc(1ull<<(int)(obj->cap_exp = size_magn((used2-1)|31)));
 		if unlikely(!dat2) abort();
@@ -401,16 +401,16 @@ templated void array_buffer_pop(array_buffer_t* obj, void* d, size_t sz){
 }
 
 templated void array_buffer_get(array_buffer_t* obj, size_t i, void* d, size_t sz){
-	memcpy(d, (obj->cap_exp ? obj->data : (char*)&obj->data)+i, sz);
+	memcpy(d, (obj->cap_exp ? obj->data : obj->data_i)+i, sz);
 }
 
 templated void array_buffer_set(array_buffer_t* obj, size_t i, void* d, size_t sz){
-	memcpy((obj->cap_exp ? obj->data : (char*)&obj->data)+i, d, sz);
+	memcpy((obj->cap_exp ? obj->data : obj->data_i)+i, d, sz);
 }
 
 static inline array_iterator_t array_buffer_iterator(array_buffer_t* obj, size_t i, size_t count){
 	if(count > obj->size-i) count = obj->size-i;
-	return (array_iterator_t){(obj->cap_exp ? obj->data : (char*)&obj->data)+i, count};
+	return (array_iterator_t){(obj->cap_exp ? obj->data : obj->data_i)+i, count};
 }
 
 templated size_t array_iterator_next(array_iterator_t* obj, void* d, size_t sz){
