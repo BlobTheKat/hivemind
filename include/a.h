@@ -401,9 +401,9 @@ static inline DWORD WINAPI _thread_wrapper(void* a_){
 }
 
 static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack){
-	HANDLE h = CreateThread(NULL, stack, _thread_wrapper, t, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, NULL);
-	if(!h) return 0;
 	struct _thread_t* t = (struct _thread_t*) malloc(sizeof(struct _thread_t));
+	HANDLE h = CreateThread(NULL, stack, _thread_wrapper, t, STACK_SIZE_PARAM_IS_A_RESERVATION | CREATE_SUSPENDED, NULL);
+	if(!h){ free(t); return 0; }
 	t->fn = fn;
 	t->arg = arg;
 	atomic_init(&t->_handle, h);
