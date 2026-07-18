@@ -2,7 +2,7 @@
  * Atomics & threads complement library
  * Matthew Reiner, 2026
  * Available under the GPL 3.0 license
- * Targeting: Windows, Linux, *BSD, MacOS
+ * Targeting: Windows, Linux, FreeBSD, NetBSD, OpenBSD, MacOS
  * Implements the following:
  *  - Wait/Notify functionality for simple types up to 64 bit
  *  - Arbitrary condition wait
@@ -278,9 +278,9 @@ static inline void static_memory_barrier(memory_barrier_t flags){
 // Yield the current thread's execution to allow other threads to run. This operation is slower than relaxing (see `thread_relax`) and should be preferred for long wait durations or when the system is under load.
 static inline void thread_yield(void);
 
-#define _atomic_futex_loop(addr, val, wait, s, y, o) int count = s; \
-	while(count--) if(atomic_load_explicit(addr, o) != val) return; else thread_relax(); \
-	count = y; while(count--) if(atomic_load_explicit(addr, o) != val) return; else thread_yield(); \
+#define _atomic_futex_loop(addr, val, wait, s, y, order) int count = s; \
+	while(count--) if(atomic_load_explicit(addr, order) != val) return; else thread_relax(); \
+	count = y; while(count--) if(atomic_load_explicit(addr, order) != val) return; else thread_yield(); \
 	wait; goto check;
 
 // Returns the a hint for the maximum available concurrency on this system. Assigning busy work to more threads than this is more likely to be detrimental to performance than beneficial.
@@ -370,9 +370,13 @@ static inline void _atomic_waitloop_ptr(void* a_, void* val, memory_order o){ _A
 // Notify an `atomic_wait` that the value may have changed
 // This will wake one or more threads waiting on the given address. `n` is the number of threads to wake, or `-1` to wake all threads. The implementation may wake more threads than requested, but will never wake fewer threads than requested or are waiting.
 // On Windows, the implementation will wake all threads when `n > 1` (this is an implementation constraint).
-#define atomic_wake(ptr, n) do{ if((int)(n)==1) WakeByAddressSingle(ptr); else WakeByAddressAll(ptr); }while(0)
+#define atomic_wake(ptr, n) do{ \
+	if((int)(n)==1) WakeByAddressSingle(ptr); \
+	else WakeByAddressAll(ptr); \
+	}while(0)
 
-#define _atomic_wake32_all(ptr) WakeByAddressAll(ptr)
+#define _atomic_wake32_all(ptr) \
+	WakeByAddressAll(ptr)
 
 static inline void _atomic_wake_condition(void* addr, int n){
 	_Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr)^((uintptr_t)addr>>5))&31];
@@ -411,7 +415,6 @@ static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack
 	ResumeThread(h);
 	return t;
 }
-
 static inline void* thread_join(thread_t t){
 	HANDLE h = atomic_load_explicit(&t->_handle, memory_order_acquire);
 	if(h){
@@ -427,9 +430,10 @@ static inline void thread_detach(thread_t t){
 	if(h){ CloseHandle(h); }
 	else free(t);
 }
-
 static inline thread_t thread_self(void){ return _a_thread_self; }
+
 static inline void thread_yield(void){ SwitchToThread(); }
+
 #define _SLEEP_MAX (uint64_t)(INFINITE-1)
 static inline void thread_sleep(uint64_t useconds){
 	useconds = (useconds+999) / 1000;
@@ -445,9 +449,7 @@ static inline bool thread_set_priority(thread_priority_t p){
 	return SetThreadPriority(GetCurrentThread(), p == THREAD_PRIO_BACKGROUND ? THREAD_PRIORITY_LOWEST : p == THREAD_PRIO_REALTIME ? THREAD_PRIORITY_TIME_CRITICAL : THREAD_PRIORITY_NORMAL);
 }
 
-static inline wait_t thread_wait_token(){
-	return (uintptr_t)&_a_park_flag;
-}
+static inline wait_t thread_wait_token(){ return (uintptr_t)&_a_park_flag; }
 static inline void thread_wait(wait_t v){
 	uint8_t zero = 0;
 	WaitOnAddress((uint8_t*)v, &zero, 1, INFINITE);
@@ -494,6 +496,7 @@ static inline uint64_t thread_now(void){
 }
 
 #else
+
 #include <sched.h>
 #include <unistd.h>
 #ifdef __linux__
@@ -526,21 +529,32 @@ static inline uint64_t thread_now(void){
 	// _atomic_futex64 also makes use of bitset to reduce unnecessary wakeups (from 1-in-32 to 1-in-1024)
 	// The exact same algorithm used by _atomic_futex64 can be used to implement wait for arbitrary sizes or conditions
 
-	#define _atomic_futex_wake_small(addr, n) int off = ((uintptr_t)addr)&3; \
+	#define _atomic_futex_wake_small(addr, n) \
+		int off = ((uintptr_t)addr)&3; \
 		syscall(SYS_futex, (char*)addr-off, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1<<(off<<3))
-	#define _atomic_futex_wake32(addr, n) syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, n, 0, 0)
-	#define _atomic_futex_wake64(addr, n) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
+	
+	#define _atomic_futex_wake32(addr, n) \
+		syscall(SYS_futex, addr, FUTEX_WAKE_PRIVATE, n, 0, 0)
+
+	#define _atomic_futex_wake64(addr, n) \
+		_Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
 		atomic_fetch_add_explicit(fut, 1, memory_order_release); \
 		syscall(SYS_futex, fut, FUTEX_WAKE_BITSET_PRIVATE, n, 0, 0, 1u<<(((uintptr_t)addr>>8)&31));
-	#define _atomic_futex_small(addr, val, m, check) int off = ((uintptr_t)addr)&3; \
+	
+	#define _atomic_futex_small(addr, val, m, check) \
+		int off = ((uintptr_t)addr)&3; \
 		void* addr2 = (char*)addr-off; off <<= 3; \
 		check {\
 		uint32_t v = atomic_load_explicit((volatile _Atomic uint32_t*) addr2, memory_order_relaxed); \
 		uint32_t v2 = v&m | (uint32_t)(val)<<off; \
 		if(v != v2) return; \
 		syscall(SYS_futex, addr2, FUTEX_WAIT_BITSET_PRIVATE, v, 0, 0, 1<<off); }
-	#define _atomic_futex32(addr, val) syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, (uint32_t)(val), 0, 0)
-	#define _atomic_futex64(addr, val, check) _Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
+	
+	#define _atomic_futex32(addr, val) \
+		syscall(SYS_futex, addr, FUTEX_WAIT_PRIVATE, (uint32_t)(val), 0, 0)
+
+	#define _atomic_futex64(addr, val, check) \
+		_Atomic uint32_t *fut = &_atomic_waiter_pool[((uintptr_t)addr>>3)&31]; \
 		uint32_t tok = atomic_load_explicit(fut, memory_order_acquire); \
 		if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
 		uint32_t m = 1u<<(((uintptr_t)addr>>8)&31); \
@@ -566,16 +580,37 @@ static inline uint64_t thread_now(void){
 	#define _atomic_futex_wake32(addr, n) \
 		_umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
 
-	#elif defined(__APPLE__) && !defined(APPLE_NO_UNSTABLE_ULOCK)
+	#if ULONG_MAX == UINT64_MAX
+		#define _atomic_futex_wake64(addr, n) _umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
+		#define _atomic_futex64(addr, val, c) c _umtx_op(addr, UMTX_OP_WAIT_PRIVATE, (uint64_t)(val), 0, 0)
+	#endif
+
+#elif defined(__APPLE__) && !defined(APPLE_NO_UNSTABLE_ULOCK)
 
 	#pragma clang diagnostic push
 	#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	#include <Availability.h>
 
+	// 0x1000001 = COMPARE_AND_WAIT | NO_ERRNO. Not sure which headers these constants would be defined in (if any at all)
 	#define _atomic_futex32(addr, val) \
 		syscall(SYS_ulock_wait, 0x1000001, addr, (uint32_t)(val), 0)
 
 	#define _atomic_futex_wake32(addr, n) \
 		syscall(SYS_ulock_wake, 0x1000001, addr, n)
+
+	#if (defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED >= 101500) || \
+	    (defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED >= 130000) || \
+	    (defined(__TV_OS_VERSION_MIN_REQUIRED) && __TV_OS_VERSION_MIN_REQUIRED >= 130000) || \
+	    (defined(__WATCH_OS_VERSION_MIN_REQUIRED) && __WATCH_OS_VERSION_MIN_REQUIRED >= 60000)
+
+		// 0x1000005 = COMPARE_AND_WAIT64 | NO_ERRNO
+		#define _atomic_futex64(addr, val, c) \
+			c syscall(SYS_ulock_wait, 0x1000005, addr, (uint64_t)(val), 0)
+
+		#define _atomic_futex_wake64(addr, n) \
+			syscall(SYS_ulock_wake, 0x1000005, addr, n)
+		
+	#endif
 
 #else
 
@@ -584,27 +619,22 @@ static inline uint64_t thread_now(void){
 	#define _A_FUTEX_FALLBACK
 	#define _atomic_futex32(addr, val) sched_yield()
 	#define _atomic_futex_wake32(addr, n) {}
+	#define _atomic_futex_small(addr, val, m, check) sched_yield()
+	#define _atomic_futex_wake_small(addr, n) {}
+	#define _atomic_futex64(addr, val, c) c sched_yield()
+	#define _atomic_futex_wake64(addr, n) {}
 
 #endif
 
-// MacOS __ulock and BSD _umtx are pretty similar
-// Generic 32 bit futex, because the rest is so similar
-// Read the notes on the linux implementation
-// Main difference: we don't have bitset, so _atomic_futex_small needs the same "wake the others" condition as _atomic_futex64
-// Additionally, _atomic_futex64 can't use the mask for additional waiter pool separation, so we compensate by using a better hash instead
-
-#ifdef _A_FUTEX_FALLBACK
-
-	#define _atomic_futex_small(addr, val, m, check) sched_yield()
-	#define _atomic_futex_wake_small(addr, n) {}
-	#define _atomic_futex64(addr, val, _) sched_yield()
-	#define _atomic_futex_wake64(addr, n) {}
-
-#elif !defined(__linux__)
-
-	#define _atomic_futex_wake_small(addr, n) int off = ((uintptr_t)addr)&3; \
+#ifndef _atomic_futex_small
+	
+	// Main difference from linux: we don't have bitset, so _atomic_futex_small needs the same "wake the others" condition as _atomic_futex64
+	#define _atomic_futex_wake_small(addr, n) \
+		int off = ((uintptr_t)addr)&3; \
 		_atomic_futex_wake32((char*)addr-off, n)
-	#define _atomic_futex_small(addr, val, m, check) int off = ((uintptr_t)addr)&3; \
+
+	#define _atomic_futex_small(addr, val, m, check) \
+		int off = ((uintptr_t)addr)&3; \
 		volatile _Atomic uint32_t* addr2 = (volatile _Atomic uint32_t*)((char*)addr-off); off <<= 3; \
 		check {\
 		uint32_t v = atomic_load_explicit(addr2, memory_order_relaxed); \
@@ -614,30 +644,33 @@ static inline uint64_t thread_now(void){
 		uint32_t v3 = atomic_load_explicit(addr2, memory_order_relaxed)^v; \
 		if(v3&m) return; \
 		if(v3^~m) _atomic_futex_wake32(addr2, INT_MAX);}
+	
+#endif
 
-	#if ULONG_MAX == UINT64_MAX && defined(__FreeBSD__)
-		#define _atomic_futex_wake64(addr, n) _umtx_op(addr, UMTX_OP_WAKE_PRIVATE, n, 0, 0)
-		#define _atomic_futex64(addr, val, _) _umtx_op(addr, UMTX_OP_WAIT_PRIVATE, (uint64_t)(val), 0, 0)
-	#else
-		#define _atomic_futex_wake64(addr, n) _Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr>>3)^((uintptr_t)addr>>8))&31]; \
-			atomic_fetch_add_explicit(fut, 1, memory_order_release); \
-			_atomic_futex_wake32(fut, n)
-		#define _atomic_futex64(addr, val, check) _Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr>>3)^((uintptr_t)addr>>8))&31]; \
-			uint32_t tok = atomic_load_explicit(fut, memory_order_acquire); \
-			if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
-			check { \
-			_atomic_futex32(fut, tok); \
-			if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
-			uint32_t tok2 = tok; if(tok2 == (tok=atomic_load_explicit(fut, /*this is okay: order between this and previous load doesn't matter, and the _atomic_futex_wake32 below provides us with acquire semantics*/ memory_order_relaxed))) return; \
-			_atomic_futex_wake32(fut, INT_MAX); }
-	#endif
+#ifndef  _atomic_futex64
 
+	// Main difference from linux: we can't use the mask for additional waiter pool separation, so we compensate by using a better hash instead
+	#define _atomic_futex64(addr, val, check) \
+		_Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr>>3)^((uintptr_t)addr>>8))&31]; \
+		uint32_t tok = atomic_load_explicit(fut, memory_order_acquire); \
+		if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
+		check { \
+		_atomic_futex32(fut, tok); \
+		if(atomic_load_explicit(addr, memory_order_relaxed) != val) return; \
+		uint32_t tok2 = tok; if(tok2 == (tok=atomic_load_explicit(fut, /*this is okay: order between this and previous load doesn't matter, and the _atomic_futex_wake32 below provides us with acquire semantics*/ memory_order_relaxed))) return; \
+		_atomic_futex_wake32(fut, INT_MAX); }
+	
+	#define _atomic_futex_wake64(addr, n) \
+		_Atomic uint32_t *fut = &_atomic_waiter_pool[(((uintptr_t)addr>>3)^((uintptr_t)addr>>8))&31]; \
+		atomic_fetch_add_explicit(fut, 1, memory_order_release); \
+		_atomic_futex_wake32(fut, n)
+	
 #endif
 
 static inline void _atomic_wait8(void* addr, uint8_t val){ _atomic_futex_small(addr, val, ~(255u<<off), ) }
 static inline void _atomic_wait16(_Atomic uint16_t* addr, uint16_t val){ _atomic_futex_small(addr, val, (0xFFFF0000u>>off), ) }
 static inline void _atomic_wait32(_Atomic uint32_t* addr, uint32_t val){ _atomic_futex32(addr, val); }
-static inline void _atomic_wait64(_Atomic uint64_t* addr, uint64_t val){ _atomic_futex64(addr, val, ) }
+static inline void _atomic_wait64(_Atomic uint64_t* addr, uint64_t val){ _atomic_futex64(addr, val, ); }
 static inline void _atomic_waitloop8(void* addr, uint8_t val, memory_order o){ _atomic_futex_loop((_Atomic uint8_t*)addr, val, _atomic_futex_small(addr, val, ~(255u<<off), check:), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
 static inline void _atomic_waitloop16(_Atomic uint16_t* addr, uint16_t val, memory_order o){ _atomic_futex_loop(addr, val, _atomic_futex_small(addr, val, (0xFFFF0000u>>off), check:), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
 static inline void _atomic_waitloop32(_Atomic uint32_t* addr, uint32_t val, memory_order o){ _atomic_futex_loop(addr, val, check: _atomic_futex32(addr, val), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
@@ -654,7 +687,7 @@ static inline void _atomic_wake64(void* addr, int n){ _atomic_futex_wake64(addr,
 	#define _atomic_futex_arch _atomic_futex32
 	#define _atomic_wake_arch _atomic_wake32
 #endif
-static inline void _atomic_wait_ptr(void* a_, void* val){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_arch(addr, val, ) }
+static inline void _atomic_wait_ptr(void* a_, void* val){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_arch(addr, val, ); }
 static inline void _atomic_waitloop_ptr(void* a_, void* val, memory_order o){ _Atomic(void*)* addr = (_Atomic(void*)*)a_; _atomic_futex_loop(addr, val, _atomic_futex_arch(addr, val, check:), A_H_DEFAULT_SPIN, A_H_DEFAULT_YIELD, o) }
 
 // Notify an `atomic_wait` that the value may have changed
@@ -692,7 +725,6 @@ static inline thread_t thread_create(void* (*fn)(void*), void* arg, size_t stack
 	pthread_attr_destroy(&a);
 	return t;
 }
-
 static inline void thread_detach(thread_t t){ pthread_detach(t); }
 static inline void* thread_join(thread_t t){ void* res; pthread_join(t, &res); return res; }
 
@@ -727,6 +759,7 @@ static inline void* thread_join(thread_t t){ void* res; pthread_join(t, &res); r
 #endif
 
 static inline thread_t thread_self(void){ return pthread_self(); }
+
 static inline void thread_yield(void){ sched_yield(); }
 
 static inline void thread_sleep(uint64_t useconds){
@@ -767,7 +800,7 @@ static inline uint64_t thread_now(void){
 	return (uint64_t)(ts.tv_nsec/1000) + SECOND_US*(uint64_t)ts.tv_sec;
 }
 
-#endif // WIN32 / POSIX-like
+#endif // WIN32 / POSIX-like conditional
 
 typedef _Atomic(ssize_t) atomic_ssize_t;
 
