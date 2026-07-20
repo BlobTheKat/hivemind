@@ -1,5 +1,5 @@
 NAPI_URL=https://raw.githubusercontent.com/nodejs/node-addon-api/refs/heads/main
-HIVEMIND_INCLUDE="../include"
+HIVEMIND_INCLUDE="../include ../vqueue"
 # Leave blank to dynamically link against hivemind (not recommended but maybe useful)
 HIVEMIND_SRC="../hivemind_src/main.c"
 
@@ -41,15 +41,17 @@ exists "$CXX" || CXX=clang++
 exists "$CXX" || { CXX=g++; EXTRA_FLAGS=; }
 exists "$CXX" || fail "Could not find a C++ compiler"
 
+HIVEMIND_INCLUDE="$(printf -- '-I%s ' $HIVEMIND_INCLUDE)"
+
 [ -z "$HIVEMIND_SRC" ] && HIVEMIND_SRC="-lhivemind" || {
 	exists "$CC" || CC=clang
 	exists "$CC" || { CC=gcc; EXTRA_FLAGS=; }
 	exists "$CC" || fail "Could not find a C compiler"
 	printf "\r\e[2K%s -O3 $HIVEMIND_SRC" "$CC"
-	"$CC" -c -I$HIVEMIND_INCLUDE $HIVEMIND_SRC -std=c17 $FLAGS $EXTRA_FLAGS -fPIC -o dst/hivemind.o || fail
+	"$CC" -c $HIVEMIND_INCLUDE $HIVEMIND_SRC -std=c17 $FLAGS $EXTRA_FLAGS -fPIC -o dst/hivemind.o || fail
 	HIVEMIND_SRC="dst/hivemind.o"
 }
 printf "\r\e[2K%s -shared -O3 src/bindings.cc -lhivemind -o hivemind.node" "$CXX"
-$CXX -Idst -I$HIVEMIND_INCLUDE -I$(dirname "$(command -v node)")/../include/node -std=c++20 $FLAGS $EXTRA_FLAGS -fno-exceptions -DNODE_ADDON_API_DISABLE_CPP_EXCEPTIONS -fPIC -shared src/bindings.cc $HIVEMIND_SRC -Wl,-undefined,dynamic_lookup -o hivemind.node || fail
+$CXX -Idst $HIVEMIND_INCLUDE -I$(dirname "$(command -v node)")/../include/node -std=c++20 $FLAGS $EXTRA_FLAGS -fno-exceptions -DNODE_ADDON_API_DISABLE_CPP_EXCEPTIONS -fPIC -shared src/bindings.cc $HIVEMIND_SRC -Wl,-undefined,dynamic_lookup -o hivemind.node || fail
 [ -n "${KEEP_DST+x}" ] || rm -rf dst
 printf '\r\e[2K\e[92m  *** Build Succeeded in %ds ***\e[m\n' "$(($(date +%s) - start))"

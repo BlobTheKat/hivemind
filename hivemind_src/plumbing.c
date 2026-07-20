@@ -239,6 +239,26 @@ static uint64_t _ram_packed_kex_verify(hivemind_server_t* s, const remote_t* fro
 	return t1;
 }
 
+static inline bool addr_compare(const ip_addr_t* a, uint16_t ap, const ip_addr_t* b, uint16_t bp, uint8_t mv4, uint8_t mv6){
+	if(!(a->dwords[0] | a->dwords[1] | (le32toh(a->words[2])^0xffff0000))){
+		if(b->dwords[0] | b->dwords[1] | (le32toh(b->words[2])^0xffff0000)) return false;
+		// ipv4
+		if(mv4 >= 32){
+			if(mv4 > 48 || (ap^bp)>>(48-mv4)) return false;
+			return a->dwords[3] == b->dwords[3];
+		}
+		return !(mv4 && (be32toh(a->dwords[3] ^ b->dwords[3]) >> (32 - mv4)));
+	}
+	// ipv6
+	if(mv6 >= 128){
+		if(mv6 > 144 || (ap^bp)>>(144-mv6)) return false;
+		return !memcmp16(a->dwords, b->dwords);
+	}
+	if(mv6 >= 8 && memcmp(a, b, mv6>>3)) return false;
+	if((mv6&7) && ((a->bytes[mv6>>3] ^ b->bytes[mv6>>3]) >> (8-mv6))) return false;
+	return true;
+}
+
 static inline void _split_by_hash(struct _hivemind_remote *p, struct _hivemind_remote** out, size_t buckets){
 	struct _hivemind_remote *pl = 0, *pr = 0;
 	while(p){
@@ -305,7 +325,7 @@ static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_ad
 		free(s->remote_buckets); s->remote_buckets = state = state2;
 		buckets <<= 1;
 	}
-	init:
+	init: {}
 	// For just one bucket (up to 4 remotes) save an allocation
 	struct _hivemind_remote** onext = buckets > 1 ? &state[hash&(buckets-1)] : (struct _hivemind_remote**) &s->remote_buckets, *next = *onext;
 	if(use_vq){
@@ -382,26 +402,6 @@ static void encrypt_packet(uint32_t chacha[16], struct _send_packet* p){
 	Poly1305(pl, (size_t)(p->len_p>>4)<<6, (uint8_t*)d, p->payload);
 }
 
-static inline bool addr_compare(const ip_addr_t* a, uint16_t ap, const ip_addr_t* b, uint16_t bp, uint8_t mv4, uint8_t mv6){
-	if(!(a->dwords[0] | a->dwords[1] | (le32toh(a->words[2])^0xffff0000))){
-		if(b->dwords[0] | b->dwords[1] | (le32toh(b->words[2])^0xffff0000)) return false;
-		// ipv4
-		if(mv4 >= 32){
-			if(mv4 > 48 || (ap^bp)>>(48-mv4)) return false;
-			return a->dwords[3] == b->dwords[3];
-		}
-		return !(mv4 && (be32toh(a->dwords[3] ^ b->dwords[3]) >> (32 - mv4)));
-	}
-	// ipv6
-	if(mv6 >= 128){
-		if(mv6 > 144 || (ap^bp)>>(144-mv6)) return false;
-		return !memcmp16(a->dwords, b->dwords);
-	}
-	if(mv6 >= 8 && memcmp(a, b, mv6>>3)) return false;
-	if((mv6&7) && ((a->bytes[mv6>>3] ^ b->bytes[mv6>>3]) >> (8-mv6))) return false;
-	return true;
-}
-
 #define _KEYLESS_PACKET_SIZE(n) 40+((n+3)&-4)
 #define _KEYLESS_PACKET_OFF 40
 
@@ -433,9 +433,4 @@ static inline void _crcinitless_packet_finish(hivemind_server_t* s, const remote
 	*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
 	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len + (opts>>23<<2));
 	soft_assert(send_success);
-}
-
-static inline bool isbypass(struct _hivemind_remote* state){
-	hivemind_server_t* s = state->server;
-	return addr_compare(&state->addr, state->port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
 }

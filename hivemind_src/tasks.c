@@ -1194,4 +1194,5 @@ static void* _hivemind_vq_loop(hivemind_server_t* s){
 	vqueue_close(&s->vq);
 	atomic_store_explicit(&s->vq_flag, 0, memory_order_release);
 	atomic_wake(&s->vq_flag, 1);
+	return 0;
 }

@@ -74,7 +74,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 	lock_release(&_hivemind_meta.threads_lock, 1);
 	if(s->network_bypass_prefix_v4 < 48 || s->network_bypass_prefix_v6 < 144){
 		atomic_init(&s->vq_flag, 1);
-		thread_detach(thread_create(_hivemind_vq_loop, s, 0));
+		thread_detach(thread_create((void*(*)(void*))_hivemind_vq_loop, s, 0));
 	}else atomic_init(&s->vq_flag, 0);
 	return true;
 }
