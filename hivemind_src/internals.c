@@ -9,6 +9,8 @@
 #include <stdatomic.h>
 #include <alloca.h>
 #include "utils.h"
+#define VQUEUE_IMPL
+#include <vqueue.h>
 
 static_assert(CHAR_BIT == 8);
 
@@ -77,6 +79,21 @@ typedef signed __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 #endif
 
+struct _hivemind_remote_vq{
+	// Identical to start of struct _hivemind_remote
+	struct _hivemind_remote* next;
+	union{
+		remote_t remote;
+		struct{
+			ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
+			atomic(uint32_t) ref;
+		};
+	};
+	atomic(uint64_t) vq_last_used;
+	struct _hivemind_remote** prevp;
+	vqueue_t q;
+};
+
 struct _hivemind_remote{
 	// Field order is specific and to avoid an entire cache line of wasted padding and reduce false sharing
 	// This layout is optimized for 64 bit pointers and size_t.
@@ -89,7 +106,7 @@ struct _hivemind_remote{
 	union{
 		remote_t remote;
 		struct{
-			ip_addr_t addr; uint16_t port, server_mtu;
+			ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
 			x_socket_t handle;
 		};
 	};
@@ -219,6 +236,7 @@ struct hivemind_server_t{
 	atomic_flag _id_lock;
 #endif
 	uint8_t buckets_exp, pipes_bucket_exp;
+	_Atomic uint8_t vq_flag;
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
 	struct _hivemind_remote** remote_buckets;
@@ -229,6 +247,7 @@ struct hivemind_server_t{
 	atomic(hivemind_server_t*) next, *prevp;
 	x_socket_t handle;
 	uint32_t first_id[5];
+	vqueue_t vq;
 	alignas(256) char end_[];
 };
 

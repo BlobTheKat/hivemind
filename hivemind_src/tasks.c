@@ -56,10 +56,16 @@ static void _remove_unused(hivemind_server_t* s, uint64_t t){
 	for(size_t b = 0; b < buckets; b++){
 		struct _hivemind_remote* state = s->remote_buckets[b];
 		while(state){
-			uint64_t r = atomic_load_explicit(&state->recv_last_used, memory_order_relaxed);
-			uint64_t s = atomic_load_explicit(&state->send_last_used, memory_order_relaxed);
-			if(r && s && (r-t+1)>>1 > c && s-t > c){
-				array_buffer_push(&candidates, &state, sizeof(state));
+			if(state->bypass_type&2){
+				struct _hivemind_remote_vq* state_vq = (struct _hivemind_remote_vq*) state;
+				uint64_t last_used = atomic_load_explicit(&state_vq->vq_last_used, memory_order_relaxed);
+				if(last_used-t > c) array_buffer_push(&candidates, &state, sizeof(state));
+			}else{
+				uint64_t r = atomic_load_explicit(&state->recv_last_used, memory_order_relaxed);
+				uint64_t s = atomic_load_explicit(&state->send_last_used, memory_order_relaxed);
+				if(r && s && (r-t+1)>>1 > c && s-t > c){
+					array_buffer_push(&candidates, &state, sizeof(state));
+				}
 			}
 			assert(state != state->next);
 			state = state->next;
@@ -71,22 +77,36 @@ static void _remove_unused(hivemind_server_t* s, uint64_t t){
 	}
 	shared_lock_upgrade(&s->state_lock);
 	array_iterator_t it = array_buffer_iterator(&candidates, 0, -1ull);
-	struct _hivemind_remote* state;
+	struct _hivemind_remote* state, **prevp;
 	while(array_iterator_next(&it, &state, sizeof(state))){
-		uint64_t r = _time_lock_acq(&state->recv_last_used);
-		uint64_t s = _time_lock_acq(&state->send_last_used);
-		t = _hivemind_internal_clock();
-		if(state->send_unlocked_ref || state->recv_unlocked_ref || state->undrained_next || state->unsent_ack_next || (r-t+1)>>1 <= c || s-t <= c){
-			_time_lock_rel(&state->recv_last_used, r);
-			_time_lock_rel(&state->send_last_used, s);
-			continue;
+		if(state->bypass_type&2){
+			struct _hivemind_remote_vq* state_vq = (struct _hivemind_remote_vq*) state;
+			uint32_t ref = atomic_load_explicit(&state_vq->ref, memory_order_acquire);
+			if(ref) continue;
+			uint64_t last_used = atomic_load_explicit(&state_vq->vq_last_used, memory_order_relaxed);
+			if(last_used-t <= c) continue;
+			vqueue_close(&state_vq->q);
+			prevp = state_vq->prevp;
+		}else{
+			uint64_t r = _time_lock_acq(&state->recv_last_used);
+			uint64_t s = _time_lock_acq(&state->send_last_used);
+			t = _hivemind_internal_clock();
+			if(state->send_unlocked_ref || state->recv_unlocked_ref || state->undrained_next || state->unsent_ack_next || (r-t+1)>>1 <= c || s-t <= c){
+				_time_lock_rel(&state->recv_last_used, r);
+				_time_lock_rel(&state->send_last_used, s);
+				continue;
+			}
+			// FREE!!!
+			_hivemind_remote_cleanup_recv(state);
+			_hivemind_remote_cleanup_send(state);
+			prevp = state->prevp;
 		}
-		// FREE!!!
-		_hivemind_remote_cleanup_recv(state);
-		_hivemind_remote_cleanup_send(state);
-		*state->prevp = state->next;
-		if(state->next)
-			state->next->prevp = &state->next;
+		*prevp = state->next;
+		struct _hivemind_remote* next = state->next;
+		if(next){
+			if(next->bypass_type&2) ((struct _hivemind_remote_vq*)next)->prevp = prevp;
+			else next->prevp = prevp;
+		}
 		free(state);
 	}
 	array_buffer_destroy(&candidates);
@@ -105,7 +125,8 @@ static size_t _hivemind_send_packet(struct _hivemind_remote* state, struct _send
 	return len+48;
 }
 
-static void _drain_writes(struct _hivemind_remote* state, uint64_t now, bool bypass){
+static void _drain_writes(struct _hivemind_remote* state, uint64_t now){
+	bool bypass = state->bypass_type == 1;
 	if unlikely((state->rtt_gate_lo&5)==4){
 		// network partition
 		uint32_t rtt_gate = (uint32_t)state->rtt_gate_lo|(uint32_t)state->rtt_gate_hi<<16;
@@ -664,7 +685,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 			if(plen < 76 && (!(plen&4) || plen==12)){
 				// ack
 				if likely(plen == 12 || packet[12]){
-					struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, false);
+					struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, 0);
 					_time_lock_acq(&state->send_last_used);
 					uint64_t tim = _hivemind_internal_clock();
 					shared_lock_release(&s->state_lock);
@@ -697,7 +718,8 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 				unsigned payload_len = plen-20-(opts>>23<<2); // high bit set = trunc len by 4 bytes
 				if(crc64(crcinit, packet, payload_len) != crc)
 					continue; // crc failed
-				struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, true);
+				struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, _HIVEMIND_FIND_CREATE);
+				if(!state) continue;
 				uint64_t l = _time_lock_acq(&state->recv_last_used);
 				// Prevent replay attack
 				if(t1 <= state->key_derived_when){
@@ -735,7 +757,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 				*(uint32_t*)(packet+8) = htole32(dhash); *(uint32_t*)(packet+12) = htole32(dhash>>32);
 				if(crc64(crcinit, packet, plen) != crc) continue;
 			}
-			struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, header == 16);
+			struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, header == 16 ? _HIVEMIND_FIND_CREATE : 0);
 			if unlikely(!state) continue;
 			uint64_t l = _time_lock_acq(&state->recv_last_used);
 			uint64_t tim = _hivemind_internal_clock();
@@ -808,7 +830,7 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 		if(plen < 84){
 			// ack
 			if likely(plen == 20 || packet[20] != 0){
-				struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, false);
+				struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, 0);
 				if(!state) continue;
 				_time_lock_acq(&state->send_last_used);
 				uint64_t tim = _hivemind_internal_clock();
@@ -853,7 +875,8 @@ static uint8_t* _drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned buf
 			else memcpy(tag, poly_key, 16);
 			if(memcmp16(tag, ptag))
 				continue; // sig failed
-			struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, true);
+			struct _hivemind_remote* state = _hivemind_state_find(s, from.addr, from.port, _HIVEMIND_FIND_CREATE);
+			if(!state) continue;
 			uint64_t l = _time_lock_acq(&state->recv_last_used);
 			// Prevent replay attack
 			if(t1 <= state->key_derived_when){
@@ -1031,7 +1054,7 @@ static void* _hivemind_listen(void* _){
 					struct _hivemind_remote* n = state->unsent_ack_next;
 					if(!state->ack_coal_i) goto rem;
 					if((((tim<<8) - (state->ack_coal_tim0<<8)) >> 8) >= SEND_TICK){
-						_queue_ack(state, state->recv_seq_lo, state->recv_seq_hi, 0, true, isbypass(state));
+						_queue_ack(state, state->recv_seq_lo, state->recv_seq_hi, 0, true, state->bypass_type == 1);
 						rem:
 						*prev = n;
 						state->unsent_ack_next = 0;
@@ -1066,7 +1089,7 @@ static void* _hivemind_listen(void* _){
 							goto next_u;
 						}
 					}else{
-						_drain_writes(state, tim, isbypass(state));
+						_drain_writes(state, tim);
 						prev = &state->undrained_next;
 					}
 					_time_lock_rel(&state->send_last_used, tim);
@@ -1131,14 +1154,17 @@ static void* _hivemind_listen(void* _){
 			else if(s->prevp == &_hivemind_meta.servers)
 				x_event_queue_wake(&_hivemind_meta.queue, 0);
 			lock_release(&_hivemind_meta.threads_lock, 1);
+
 			_hazard_wait(s);
+			if(atomic_load_explicit(&s->vq_flag, memory_order_relaxed)){
+				atomic_wait(&s->vq_flag, 1);
+			}
 			exclusive_lock_wait(&s->state_lock);
 			// Server should be unreachable after this
 
 			// Fearless freeing!
 			_hivemind_finish(s, oc->finish_cb, oc->filename[0] ? oc->filename : 0);
 			void (*on_close)(void*) = oc->cb;
-			
 			free(oc);
 			
 			// Safe to teardown
@@ -1154,4 +1180,18 @@ static void* _hivemind_listen(void* _){
 	atomic_store_explicit(self.prevp, next, memory_order_release);
 	lock_release(&_hivemind_meta.threads_lock, 1);
 	return 0;
+}
+
+static void* _hivemind_vq_loop(hivemind_server_t* s){
+	for(;;){
+		vqueue_block_t msg = vqueue_wait(&s->vq);
+		if(msg.size >= 20){
+			_fire_pipe(s, (uint32_t*)msg.data, msg.data+20, msg.size-20);
+		}
+		vqueue_free(&s->vq, msg);
+		if(!msg.size) break;
+	}
+	vqueue_close(&s->vq);
+	atomic_store_explicit(&s->vq_flag, 0, memory_order_release);
+	atomic_wake(&s->vq_flag, 1);
 }

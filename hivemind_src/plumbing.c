@@ -251,19 +251,23 @@ static inline void _split_by_hash(struct _hivemind_remote *p, struct _hivemind_r
 	out[0] = pl; out[buckets] = pr;
 }
 
-static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_addr_t addr, uint16_t port, bool create){
+#define _HIVEMIND_FIND_CREATE 1
+#define _HIVEMIND_FIND_INCLUDE_VQ 2
+static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_addr_t addr, uint16_t port, uint8_t expect){
 	uint64_t hash = _mix64_addr(addr, port);
 	shared_lock_acquire(&s->state_lock);
-	bool has_excl = false;
+	bool has_excl = false, use_vq;
 	retry: {}
 	struct _hivemind_remote** state = s->remote_buckets;
 	size_t buckets = (1<<s->buckets_exp&-2ull)>>1;
 	struct _hivemind_remote* p;
 	if(!buckets){
-		if(!create) cr_fail: {
+		if(!(expect&_HIVEMIND_FIND_CREATE)) fail: {
 			shared_lock_release(&s->state_lock);
 			return NULL;
 		}
+		use_vq = addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->network_bypass_prefix_v4, s->network_bypass_prefix_v6);
+		if(use_vq && !(expect&_HIVEMIND_FIND_INCLUDE_VQ)) goto fail;
 		shared_lock_upgrade(&s->state_lock);
 		if(!(state = s->remote_buckets))
 			s->buckets_exp = buckets = 1;
@@ -275,17 +279,20 @@ static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_ad
 	while(p){
 		if(!memcmp(&p->addr, &addr, 16) && p->port == port){
 			if(has_excl) exclusive_lock_downgrade(&s->state_lock);
+			if((p->bypass_type&2) && !(expect&_HIVEMIND_FIND_INCLUDE_VQ)) goto fail;
 			return p;
 		}
 		p = p->next;
 	}
-	if(!create) goto cr_fail;
+	if(!(expect&_HIVEMIND_FIND_CREATE)) goto fail;
 	// Not found
 	if(!has_excl){
-		shared_lock_upgrade(&s->state_lock);
 		has_excl = true;
-		goto retry;
+		use_vq = addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->network_bypass_prefix_v4, s->network_bypass_prefix_v6);
+		if(use_vq && !(expect&_HIVEMIND_FIND_INCLUDE_VQ)) goto fail;
+		if(!shared_lock_upgrade(&s->state_lock)) goto retry;
 	}
+
 	if((s->remote_count++) == (buckets<<1)){
 		size_t bytes = sizeof(struct _hivemind_remote*) * (buckets<<1);
 		struct _hivemind_remote** state2 = (struct _hivemind_remote**) _hivemind_alloc(bytes);
@@ -299,22 +306,48 @@ static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_ad
 		buckets <<= 1;
 	}
 	init:
-	p = (struct _hivemind_remote*) _hivemind_alloc_a(sizeof(struct _hivemind_remote), alignof(struct _hivemind_remote));
-	memset(p, 0, sizeof(*p));
-	p->handle = s->handle;
 	// For just one bucket (up to 4 remotes) save an allocation
 	struct _hivemind_remote** onext = buckets > 1 ? &state[hash&(buckets-1)] : (struct _hivemind_remote**) &s->remote_buckets, *next = *onext;
-	p->next = next; if(next) next->prevp = &p->next;
-	*(p->prevp = onext) = p;
-	p->addr = addr; p->port = port; p->server_mtu = le16toh(s->mtu_le);
-	// 0.1us = ~10MB/s = ~80Mbps
-	p->us_per_byte = .1f;
-	p->min_latency = INFINITY;
-	p->avg_latency = 500000;
-	atomic_init(&p->send_last_used, 1);
-	atomic_init(&p->recv_last_used, 1);
-	p->send_order_end = &p->send_order_start;
-	p->server = s;
+	if(use_vq){
+		p = (struct _hivemind_remote*) _hivemind_alloc_a(sizeof(struct _hivemind_remote_vq), alignof(struct _hivemind_remote_vq));
+		struct _hivemind_remote_vq* p_vq = (struct _hivemind_remote_vq*) p;
+		memset(p_vq, 0, sizeof(*p_vq));
+		const char set[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+		char name[56] = "hivemind_";
+		for(unsigned i = 0, j = 9; i < 16; i += 2, j += 5){
+			uint16_t v = le16toh(addr.words[i]);
+			name[j] = set[v&15]; name[j+1] = set[(v>>4)&15];
+			name[j+2] = set[(v>>8)&15]; name[j+3] = set[(v>>12)&15];
+			name[j+4] = '_';
+		}
+		name[49] = set[port&15]; name[50] = set[(port>>4)&15];
+		name[51] = set[(port>>8)&15]; name[52] = set[(port>>12)&15];
+		name[53] = '.'; name[54] = 'v'; name[55] = 'q';
+		p_vq->bypass_type = 2 + vqueue_open(&p_vq->q, name, sizeof(name));
+		p_vq->prevp = onext;
+	}else{
+		p = (struct _hivemind_remote*) _hivemind_alloc_a(sizeof(struct _hivemind_remote), alignof(struct _hivemind_remote));
+		memset(p, 0, sizeof(*p));
+		p->handle = s->handle;
+		p->server_mtu = le16toh(s->mtu_le)>>2;
+		p->bypass_type = addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
+		// 0.1us = ~10MB/s = ~80Mbps
+		p->us_per_byte = .1f;
+		p->min_latency = INFINITY;
+		p->avg_latency = 500000;
+		atomic_init(&p->send_last_used, 1);
+		atomic_init(&p->recv_last_used, 1);
+		p->send_order_end = &p->send_order_start;
+		p->server = s;
+		p->prevp = onext;
+	}
+	*onext = p;
+	p->next = next;
+	if(next){
+		if(next->bypass_type&2) ((struct _hivemind_remote_vq*)next)->prevp = &p->next;
+		else next->prevp = &p->next;
+	}
+	p->addr = addr; p->port = port;
 	exclusive_lock_downgrade(&s->state_lock);
 	return p;
 } //Callee must shared_lock_release(&s->state_lock) when done

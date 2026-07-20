@@ -55,10 +55,29 @@ static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz
 		if(p+20 > end) break;
 		ip_addr_t addr; memcpy(addr.bytes, p, 16);
 		uint32_t x = _read32(p+16);
-		struct _hivemind_remote* state = _hivemind_state_find(s, addr, (uint16_t)x, true);
+		struct _hivemind_remote* state = _hivemind_state_find(s, addr, (uint16_t)x, _HIVEMIND_FIND_CREATE);
 		p += 20;
 		bool r = x>>16&1, w = x>>17&1;
 		uint8_t* pw = p+68;
+		if(!state){
+			if(r){
+				if(p+68 > end) break;
+				size_t rsz = _read64(p+52);
+				p += 68 + w*68;
+				if(_read64(p)) p += 16+_read64(p+8);
+				else p += 8;
+				rsz--;
+				for(; rsz; rsz--)
+					p += _read32(p)+4;
+			}
+			if(w){
+				if(pw+68 > end) break;
+				size_t wsz = _read64(pw+52);
+				for(; wsz; wsz--)
+					p += _read32(p)+4;
+			}
+			continue;
+		}
 		if(r){
 			if(p+68 > end || atomic_load_explicit(&state->recv_last_used, memory_order_relaxed) > 1) break;
 			for(unsigned i = 0; i < 8; i++) state->recv_key[i] = _read32(p+i*4);
@@ -93,7 +112,7 @@ static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz
 				}
 				sfat_pointer_t p0 = sfat_pack(p2, sz);
 				ring_buffer_push(&state->recv_queue, &p0, sizeof(p0), true);
-				p += sz+4;
+				p += 4+sz;
 			}
 		}
 		next:
@@ -104,7 +123,7 @@ static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz
 			if(sl) atomic_store_explicit(&state->send_last_used, sl, memory_order_relaxed);
 			state->send_seq_hi = _read32(pw+40);
 			state->send_seq_lo = _read64(pw+44);
-			size_t wsz = _read64(pw+52) * sizeof(struct _send_packet*);
+			size_t wsz = _read64(pw+52);
 			uint32_t tmp = _read32(pw+60);
 			memcpy(&state->avg_latency, &tmp, sizeof(tmp));
 			tmp = _read32(pw+64);
@@ -192,7 +211,7 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 			uint64_t sl = _time_lock_acq(&state->send_last_used);
 			assert(!state->recv_unlocked_ref && !state->send_unlocked_ref);
 			state->ack_coal_i = 0;
-			bool bypass = isbypass(state);
+			bool bypass = state->bypass_type == 1;
 			if(save){
 				// Save: { Send, Recv } { Buffer, Seq, Last used } + Read KDW + Write RQR state
 				bool r = rl!=1&&(t>life+life?rl>=t-life-life:true), w = sl!=1&&(t>life?sl>=t-life:true);

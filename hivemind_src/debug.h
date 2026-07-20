@@ -3,7 +3,7 @@
 
 deprecate("Debug")
 static void check_send(struct _hivemind_remote* state){
-	bool bypass = isbypass(state);
+	bool bypass = state->bypass_type == 1;
 	if(!state->unsent_i)
 		assert(state->send_order_end == &state->send_order_start);
 	size_t lo = state->send_seq_lo-ring_buffer_size(&state->send_queue)/sizeof(struct _send_packet**);

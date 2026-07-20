@@ -72,6 +72,10 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 	atomic_init(&s->next, prev);
 	atomic_store_explicit(s->prevp = &_hivemind_meta.servers, s, memory_order_release);
 	lock_release(&_hivemind_meta.threads_lock, 1);
+	if(s->network_bypass_prefix_v4 < 48 || s->network_bypass_prefix_v6 < 144){
+		atomic_init(&s->vq_flag, 1);
+		thread_detach(thread_create(_hivemind_vq_loop, s, 0));
+	}else atomic_init(&s->vq_flag, 0);
 	return true;
 }
 
@@ -128,11 +132,27 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 #endif
 	unsigned port = le16toh(to->port_le), mtu = le16toh(to->mtu_le), omtu;
+	struct _hivemind_remote* state = _hivemind_state_find(s, to->addr, (uint16_t)port, _HIVEMIND_FIND_CREATE | _HIVEMIND_FIND_INCLUDE_VQ);
+	if(state->bypass_type & 2){
+		struct _hivemind_remote_vq *state_vq = (struct _hivemind_remote_vq*) state;
+		bool open = state->bypass_type & 1;
+		atomic_fetch_add_explicit(&state_vq->ref, open, memory_order_relaxed);
+		shared_lock_release(&s->state_lock);
+		if(open){
+			vqueue_block_t block = vqueue_alloc(&state_vq->q, len+20);
+			memcpy(block.data, to->id, 20);
+			memcpy(block.data+20, msg, len);
+			vqueue_post(&state_vq->q, block);
+			atomic_store_explicit(&state_vq->vq_last_used, _hivemind_internal_clock(), memory_order_relaxed);
+			atomic_fetch_sub_explicit(&state_vq->ref, 1, memory_order_release);
+		}
+		return;
+	}
 	size_t pad_len = len + (len > 32767 ? 26 : 20), num_packets = 1;
 	uint64_t seq_lo; uint32_t seq_hi;
-	struct _hivemind_remote* state = _hivemind_state_find(s, to->addr, (uint16_t)port, true);
-	if(state->server_mtu < mtu) mtu = state->server_mtu;
-	bool bypass = addr_compare(&to->addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
+	uint16_t server_mtu = state->server_mtu<<2;
+	if(server_mtu < mtu) mtu = server_mtu;
+	bool bypass = state->bypass_type == 1;
 	if(bypass){
 		// Encryption bypass
 		pad_len = (pad_len + 7ull) & -8ull;
@@ -251,7 +271,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _send_packet*);
 	ring_buffer_set(&state->send_queue, i, packets, sizeof(struct _send_packet*) * num_packets, false);
-	_drain_writes(state, tim = _hivemind_internal_clock(), bypass);
+	_drain_writes(state, tim = _hivemind_internal_clock());
 	if(!state->undrained_next){
 		struct _hivemind_remote* n = atomic_load_explicit(&_hivemind_meta.undrained, memory_order_relaxed);
 		retry_acq: state->undrained_next = n;
@@ -272,6 +292,9 @@ void hivemind_quit(hivemind_server_t* s, hivemind_generic_fn_t on_close, const c
 	else oc->filename[0] = '\0';
 	s->oc = oc;
 	x_socket_t h = s->handle;
+	if(atomic_load_explicit(&s->vq_flag, memory_order_relaxed)){
+		vqueue_post(&s->vq, vqueue_alloc(&s->vq, 0));
+	}
 	tsan_fence(memory_order_release);
 	x_udp_close(h);
 }
