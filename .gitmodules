@@ -1,0 +1,3 @@
+[submodule "vqueue"]
+	path = vqueue
+	url = https://github.com/BlobTheKat/vqueue
