@@ -7,6 +7,8 @@ namespace hivemind{
 
 // 40-byte struct representing a pipe. This is an aggregate struct, you can pass it around, reconstruct it, etc. All fields are public and ABI-stable. The `id` field is a random 160-bit identifier that is used to distinguish pipes with the same address. Note that fields are all in little-endian format, this means the byte-for-byte representation is identical on all machine, allowing you to safely serialize and deserialize pipes with e.g `memcpy()`. If you want a nicer human-readable format, see `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`.
 struct HivemindPipe: hivemind_pipe_t{
+	HivemindPipe() = default;
+	HivemindPipe(hivemind_pipe_t p): hivemind_pipe_t(p){}
 	// Get the string representation of a pipe, which currently looks like `[IP]/port/mtu/time/rand_b64`.
 	std::string to_string(){
 		char out[HIVEMIND_PIPE_STR_MAX_LEN];
@@ -85,7 +87,7 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 		hivemind_send(this, to, msg, len);
 	}
 	// Overload of `send()` that accepts any type that has a contiguous data representation, such as `std::vector`, `std::string`, `std::array`, etc.
-	template<typename T> void send(const HivemindPipe& to, const T& data){
+	template<typename T2> void send(const HivemindPipe& to, const T2& data){
 		hivemind_send(this, to, (uint8_t*) data.data(), (const size_t&) data.size());
 	}
 	// Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.

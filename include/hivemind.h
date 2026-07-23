@@ -38,8 +38,8 @@ typedef struct{
 			// This setting should be identical between servers that expect to use encryption bypass. Using different settings may lead to one server rejecting packets sent by another, either because received traffic is expected to be encrypted but isn't, or vice versa.
 			// See also: `network_bypass_prefix_v6`, `network_bypass_prefix_v4`
 			uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
-			// Network bypass allows hivemind to avoid the kernel's network stack, instead using pipes or UNIX domain sockets, saving a lot of CPU
-			// Hivemind sets its pipes under /var/run/hivemind on UNIX-based systems and \\.\hivemind\ on Windows
+			// Network bypass allows hivemind to avoid the kernel's network stack, instead using vqueue, a copyless IPC protocol utilizing shared memory, saving a lot of CPU
+			// Queue identifiers are derived from the receiver IP/port
 			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables network bypass
 			// The default is 255 for IPv6 (Match IP and port exactly) and 255 for IPv4 (ditto), effectively disabling network bypass
 			// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.

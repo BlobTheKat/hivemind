@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <atomic>
+#include <mutex>
 #include "utils.hh"
 #include <hivemind.h>
 
@@ -158,6 +159,32 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			server_.mtu_lo = mtu;
 			server_.mtu_hi = mtu>>8;
 		}
+
+		auto encBypassV6 = props.Get("encryptionBypassPrefixV6");
+		if(encBypassV6.IsNumber()){
+			int v = encBypassV6.As<Napi::Number>().Uint32Value();
+			if(v > 255) v = 255;
+			server_.encryption_bypass_prefix_v6 = (uint8_t)v;
+		}
+		auto encBypassV4 = props.Get("encryptionBypassPrefixV4");
+		if(encBypassV4.IsNumber()){
+			int v = encBypassV4.As<Napi::Number>().Uint32Value();
+			if(v > 255) v = 255;
+			server_.encryption_bypass_prefix_v4 = (uint8_t)v;
+		}
+
+		auto netBypassV6 = props.Get("networkBypassPrefixV6");
+		if(netBypassV6.IsNumber()){
+			int v = netBypassV6.As<Napi::Number>().Uint32Value();
+			if(v > 255) v = 255;
+			server_.network_bypass_prefix_v6 = (uint8_t)v;
+		}
+		auto netBypassV4 = props.Get("networkBypassPrefixV4");
+		if(netBypassV4.IsNumber()){
+			int v = netBypassV4.As<Napi::Number>().Uint32Value();
+			if(v > 255) v = 255;
+			server_.network_bypass_prefix_v4 = (uint8_t)v;
+		}
 	}
 	Napi::Value listen(const Napi::CallbackInfo& info){
 		if(this->state != State::CLOSED){
@@ -299,7 +326,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 };
 
 Napi::Object Init(Napi::Env env, Napi::Object exports){
-  return HivemindServerJS::GetClass(env);
+	return HivemindServerJS::GetClass(env);
 }
 
 NODE_API_MODULE(hivemind, Init)

@@ -2,6 +2,7 @@
 **/*.dSYM
 **/.master.key
 tmp/**
+compile_flags.txt
 
 node-bindings/build/
 node-bindings/node_modules/
