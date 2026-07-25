@@ -19,7 +19,8 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		PipeMeta* m;
 		uint8_t* data; size_t size;
 	};
-	static void on_msg(HivemindServerJS* s, const uint8_t* payload, size_t size, void* udata){
+	static void on_msg(void* s_, const uint8_t* payload, size_t size, void* udata){
+		HivemindServerJS* s = (HivemindServerJS*)s_;
 		PipeMeta* m = static_cast<PipeMeta*>(udata);
 		m->ref.fetch_add(1, std::memory_order::relaxed);
 		s->msg_lock.lock();
@@ -58,14 +59,15 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			s->Unref();
 		}
 	}
-	static void on_done(HivemindServerJS* s){
+	static void on_done(void* s_){
+		HivemindServerJS* s = (HivemindServerJS*)s_;
 		s->msg_lock.lock();
 		s->state = State::CLOSING_READY;
 		s->msg_lock.unlock();
 		uv_async_send(&s->async_handle);
 	}
-	static void free_pipe(HivemindServerJS* s, PipeMeta* p){
-		delete p;
+	static void free_pipe(void* s, void* p){
+		delete (PipeMeta*)p;
 	}
 	static Napi::Value PipeToString(const Napi::CallbackInfo& info){
 		if(info.Length() != 1 || !info[0].IsArrayBuffer()) err: {

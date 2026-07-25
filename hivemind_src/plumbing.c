@@ -1,13 +1,15 @@
 #include "internals.c"
 
-struct _buf_being_built{
+struct _tls_buf_being_built{
 	array_buffer_t buf;
 	size_t sz0;
 };
-thread_local struct{
+struct _tls_packet_detach{
 	size_t packet_on_heap;
-	union{ lock_t* pipe_lock; struct _buf_being_built* buf_being_built; };
-} tls;
+	struct _hivemind_vq* vq_block;
+	lock_t* pipe_lock;
+};
+thread_local union{ struct _tls_packet_detach* packet_detach; struct _tls_buf_being_built* buf_being_built; } tls;
 static bool _pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], const uint32_t b1[5]){
 	uint64_t tn = (uint64_t)le32toh(test[0])<<24|((uint64_t)le32toh(test[1])&0xFFFFFF);
 	uint64_t t0 = (uint64_t)le32toh(b0[0])<<24|((uint64_t)le32toh(b0[1])&0xFFFFFF);
@@ -29,7 +31,7 @@ static bool _pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], const
 	return true;
 }
 
-static bool _fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t* data, size_t len){
+static bool _fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t* data, size_t len, struct _tls_packet_detach* d){
 	uint64_t hash = _mix64((uint64_t)id[1]<<32|id[4])^_mix64((uint64_t)id[2]<<32|id[3]);
 	shared_lock_acquire(&s->pipes_lock);
 	uint32_t bexp = s->pipes_bucket_exp;
@@ -43,9 +45,10 @@ static bool _fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t
 			break;
 		p = (struct _hivemind_pipe*)(atomic_load_explicit(&p->next, memory_order_acquire)&-2ull);
 	}
-	if(p && lock_try_acquire(tls.pipe_lock = &p->ref, 1)){
+	if(p && lock_try_acquire(d->pipe_lock = &p->ref, 1)){
+		tls.packet_detach = d;
 		s->on_msg(s->udata, data, len, p->udata);
-		if(tls.pipe_lock) lock_release(tls.pipe_lock, 1);
+		if(d->pipe_lock) lock_release(d->pipe_lock, 1);
 	}
 	shared_lock_release(&s->pipes_lock);
 	return true;
@@ -271,6 +274,20 @@ static inline void _split_by_hash(struct _hivemind_remote *p, struct _hivemind_r
 	out[0] = pl; out[buckets] = pr;
 }
 
+static inline void _hivemind_vq_name(char name[56], ip_addr_t addr, uint16_t port){
+	const char set[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+	memcpy(name, "hivemind_", 9);
+	for(unsigned i = 0, j = 9; i < 8; i++, j += 5){
+		uint16_t v = be16toh(addr.words[i]);
+		name[j] = set[(v>>12)&15]; name[j+1] = set[(v>>8)&15];
+		name[j+2] = set[(v>>4)&15]; name[j+3] = set[v&15];
+		name[j+4] = '_';
+	}
+	name[49] = set[(port>>12)&15]; name[50] = set[(port>>8)&15];
+	name[51] = set[(port>>4)&15]; name[52] = set[port&15];
+	name[53] = '.'; name[54] = 'v'; name[55] = 'q';
+}
+
 #define _HIVEMIND_FIND_CREATE 1
 #define _HIVEMIND_FIND_INCLUDE_VQ 2
 static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_addr_t addr, uint16_t port, uint8_t expect){
@@ -333,16 +350,7 @@ static struct _hivemind_remote* _hivemind_state_find(hivemind_server_t* s, ip_ad
 		struct _hivemind_remote_vq* p_vq = (struct _hivemind_remote_vq*) p;
 		memset(p_vq, 0, sizeof(*p_vq));
 		const char set[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-		char name[56] = "hivemind_";
-		for(unsigned i = 0, j = 9; i < 16; i += 2, j += 5){
-			uint16_t v = le16toh(addr.words[i]);
-			name[j] = set[v&15]; name[j+1] = set[(v>>4)&15];
-			name[j+2] = set[(v>>8)&15]; name[j+3] = set[(v>>12)&15];
-			name[j+4] = '_';
-		}
-		name[49] = set[port&15]; name[50] = set[(port>>4)&15];
-		name[51] = set[(port>>8)&15]; name[52] = set[(port>>12)&15];
-		name[53] = '.'; name[54] = 'v'; name[55] = 'q';
+		char name[56]; _hivemind_vq_name(name, addr, port);
 		p_vq->bypass_type = 2 + vqueue_open(&p_vq->q, name, sizeof(name));
 		p_vq->prevp = onext;
 	}else{

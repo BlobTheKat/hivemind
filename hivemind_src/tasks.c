@@ -580,10 +580,16 @@ static inline uint8_t* _push_packet(hivemind_server_t* s, struct _hivemind_remot
 				if(plen >= len){
 					uint32_t* id = (uint32_t*)p;
 					for(unsigned i = 0; i < 5; i++) id[i] = le32toh(id[i]);
-					tls.packet_on_heap = p == p0+header ? len : SIZE_MAX-1;
-					bool success = _fire_pipe(s, id, p2, len);
+					struct _tls_packet_detach d = {.packet_on_heap = SIZE_MAX-1};
+					if(p == p0+header){
+						d.packet_on_heap = len;
+					}else{
+						if((uintptr_t)p&7) p -= header;
+						*(uint16_t*)(p2-2) = p2-p;
+					}
+					bool success = _fire_pipe(s, id, p2, len, &d);
 					assert(success);
-					if(tls.packet_on_heap == SIZE_MAX-1) free(p - ((uintptr_t)p&7 ? 20 : 0));
+					if(d.packet_on_heap == SIZE_MAX-1) free(p);
 				}else{
 #if SIZE_MAX < 0x7FFFFFFFFFFF-20
 					if unlikely(len > SIZE_MAX){
@@ -597,7 +603,7 @@ static inline uint8_t* _push_packet(hivemind_server_t* s, struct _hivemind_remot
 					memcpy(new_packet+20, p2, plen);
 					cur_head = state->cur_packet + 20 + plen;
 					state->cur_packet_left = len - plen;
-					if(p != p0+header) free(p - ((uintptr_t)p&7 ? 20 : 0));
+					if(p != p0+header) free(p - ((uintptr_t)p&7 ? header : 0));
 				}
 			}else{ // append
 				assert(cur_head);
@@ -607,10 +613,12 @@ static inline uint8_t* _push_packet(hivemind_server_t* s, struct _hivemind_remot
 				if(state->cur_packet_left == plen){
 					size_t sz = (size_t)(cur_head - state->cur_packet) - 20;
 					uint8_t* p2 = state->cur_packet;
-					tls.packet_on_heap = SIZE_MAX-1;
-					bool success = _fire_pipe(s, (uint32_t*)p2, p2+20, sz);
+					struct _tls_packet_detach d = {.packet_on_heap = SIZE_MAX-1};
+					uint32_t id[5]; memcpy(id, p2, 20);
+					*(uint16_t*)(p2+18) = 20;
+					bool success = _fire_pipe(s, id, p2+20, sz, &d);
 					assert(success);
-					if(tls.packet_on_heap == SIZE_MAX-1) free(p2);
+					if(d.packet_on_heap == SIZE_MAX-1) free(p2);
 					state->cur_packet = 0; cur_head = 0;
 				}else state->cur_packet_left -= plen;
 				if(p != p0+header) free(p - ((uintptr_t)p&7 ? 20 : 0));
@@ -640,7 +648,7 @@ static inline uint8_t* _push_packet(hivemind_server_t* s, struct _hivemind_remot
 		}
 	}else{
 		// Queue packet into the ring buffer, to be later consumed by the dequeue steps when holes are filled
-		assert(lo || hi); // This should be impossible as the first (key exchange) packet
+		assert(lo || hi); // It should be impossible for this to be the first (key exchange) packet
 		uint8_t* r;
 		// Must be at least 62.5% used to be considered "worth" it
 		if(plen >= (buflen>>1)+(buflen>>3)){
@@ -1156,7 +1164,7 @@ static void* _hivemind_listen(void* _){
 			lock_release(&_hivemind_meta.threads_lock, 1);
 
 			_hazard_wait(s);
-			if(atomic_load_explicit(&s->vq_flag, memory_order_relaxed)){
+			while(atomic_load_explicit(&s->vq_flag, memory_order_relaxed)){
 				atomic_wait(&s->vq_flag, 1);
 			}
 			exclusive_lock_wait(&s->state_lock);
@@ -1183,15 +1191,22 @@ static void* _hivemind_listen(void* _){
 }
 
 static void* _hivemind_vq_loop(hivemind_server_t* s){
+	struct _hivemind_vq* b = s->vq_block;
 	for(;;){
-		vqueue_block_t msg = vqueue_wait(&s->vq);
+		vqueue_block_t msg = vqueue_wait(&b->q);
 		if(msg.size >= 20){
-			_fire_pipe(s, (uint32_t*)msg.data, msg.data+20, msg.size-20);
+			struct _tls_packet_detach d = {.packet_on_heap = msg.size, .vq_block = b};
+			_fire_pipe(s, (uint32_t*)msg.data, msg.data+20, msg.size-20, &d);
+			if(d.packet_on_heap == SIZE_MAX)
+				continue;
 		}
-		vqueue_free(&s->vq, msg);
+		vqueue_free(&b->q, msg);
 		if(!msg.size) break;
 	}
-	vqueue_close(&s->vq);
+	if(atomic_fetch_sub_explicit(&b->ref, 1, memory_order_acquire) == 1){
+		vqueue_close(&b->q);
+		free(b);
+	}
 	atomic_store_explicit(&s->vq_flag, 0, memory_order_release);
 	atomic_wake(&s->vq_flag, 1);
 	return 0;

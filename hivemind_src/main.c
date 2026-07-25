@@ -53,16 +53,29 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 		x_close(f);
 		if(!success) goto restore_failed;
 	}else restore_failed: _nalloc_id(s, s->first_id);
-	
+
+	if(s->network_bypass_prefix_v4 < 48 || s->network_bypass_prefix_v6 < 144){
+		atomic_init(&s->vq_flag, 1);
+		char name[56]; _hivemind_vq_name(name, s->addr, le16toh(s->port_le));
+		struct _hivemind_vq* b = _hivemind_alloc(sizeof(struct _hivemind_vq));
+		atomic_init(&b->ref, 1);
+		s->vq_block = b;
+		if(!vqueue_open(&b->q, name, sizeof(name))) err2: {
+			free(b);
+			goto err;
+		}
+		thread_detach(thread_create((void*(*)(void*))_hivemind_vq_loop, s, 0));
+	}else atomic_init(&s->vq_flag, 0);
+
 	lock_acquire(&_hivemind_meta.threads_lock, 1);
 	if(!_hivemind_meta.threads_max){
-		if(!x_event_queue_init(&_hivemind_meta.queue)) err2: {
+		if(!x_event_queue_init(&_hivemind_meta.queue)) err3: {
 			lock_release(&_hivemind_meta.threads_lock, 1);
-			goto err;
+			goto err2;
 		}
 		if(!x_event_queue_add(&_hivemind_meta.queue, sock, (union x_userdata_t){.ptr = s})){
 			x_event_queue_destroy(&_hivemind_meta.queue);
-			goto err2;
+			goto err3;
 		}
 		_hivemind_meta.threads_cur = 1; _hivemind_meta.threads_max = (uint32_t)available_concurrency();
 		thread_detach(thread_create(_hivemind_listen, 0, 0));
@@ -72,33 +85,46 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 	atomic_init(&s->next, prev);
 	atomic_store_explicit(s->prevp = &_hivemind_meta.servers, s, memory_order_release);
 	lock_release(&_hivemind_meta.threads_lock, 1);
-	if(s->network_bypass_prefix_v4 < 48 || s->network_bypass_prefix_v6 < 144){
-		atomic_init(&s->vq_flag, 1);
-		thread_detach(thread_create((void*(*)(void*))_hivemind_vq_loop, s, 0));
-	}else atomic_init(&s->vq_flag, 0);
 	return true;
 }
 
 uint8_t* hivemind_packet_detach(const uint8_t* p){
-	if(tls.packet_on_heap >= SIZE_MAX-1){ tls.packet_on_heap |= 1; return (uint8_t*)p; }
-	uint8_t* p2 = (uint8_t*) _hivemind_alloc(tls.packet_on_heap);
-	if(tls.packet_on_heap) memcpy(p2, p, tls.packet_on_heap);
-	tls.packet_on_heap = SIZE_MAX;
+	struct _tls_packet_detach* d = tls.packet_detach;
+	struct _hivemind_vq* b = d->vq_block;
+	if(b){
+		*(struct _hivemind_vq**)(p - 20) = b;
+		*(size_t*)(p - 20 + sizeof(struct _hivemind_vq*)) = d->packet_on_heap;
+		*(uint16_t*)(p - 2) = 0xFFFF;
+		atomic_fetch_add_explicit(&b->ref, 1, memory_order_relaxed);
+		d->packet_on_heap = SIZE_MAX; d->vq_block = 0;
+		return (uint8_t*)p;
+	}
+	if(d->packet_on_heap >= SIZE_MAX-1){ d->packet_on_heap |= 1; return (uint8_t*)p; }
+	uint8_t* p2 = (uint8_t*) _hivemind_alloc(d->packet_on_heap);
+	if(d->packet_on_heap) memcpy(p2, p, d->packet_on_heap);
+	d->packet_on_heap = SIZE_MAX;
 	return p2;
 }
 void hivemind_packet_free(const uint8_t* p){
-	// addr&7 == 2 => offset 26 (packet with pipe and long length)
-	// addr&7 == 4 => offset 20 (packet with pipe but no length, i.e length was known before allocation)
-	// addr&7 == 4 => offset 20 (see zero-copy ring buffer queue, offset for that special case is 20)
-	// addr&7 == 6 => offset 22 (packet with pipe and short length)
-	// addr&7 == 0 => offset 0 (packet with no pipe or length)
-	// addr == 0 => offset 0 (free(0) is a NOP)
-	// Technically pointer arithmetic on null is UB in C (even if not dereferenced). This is why we have the weird off ? p-off : p instead of just p-off. Under -O1 or higher, this check goes away anyway, but at least we avoid nasal demons.
-	unsigned off = 0b10111010110100000>>(((uintptr_t)p)<<1&12)&30;
-	free((void*)(off ? p-off : p));
+	if((uintptr_t)p & 7){
+		uint16_t off = *(uint16_t*)(p-2);
+		if(off == 0xFFFF){
+			p -= 20;
+			struct _hivemind_vq* b = *(struct _hivemind_vq**)p;
+			vqueue_free(&b->q, (vqueue_block_t){.size = *(size_t*)(p+sizeof(struct _hivemind_vq*)), .data = (uint8_t*)p});
+			if unlikely(atomic_fetch_sub_explicit(&b->ref, 1, memory_order_acq_rel) == 1){
+				vqueue_close(&b->q);
+				free(b);
+			}
+			return;
+		}
+		p -= off;
+	}
+	free((void*)p);
 }
 void hivemind_pipe_unlock(){
-	if(tls.pipe_lock) lock_release(tls.pipe_lock, 1), tls.pipe_lock = 0;
+	struct _tls_packet_detach* d = tls.packet_detach;
+	if(d->pipe_lock) lock_release(d->pipe_lock, 1), d->pipe_lock = 0;
 }
 
 void hivemind_create_pipe(hivemind_server_t* s, hivemind_pipe_t* pipe, void* udata){
@@ -115,8 +141,8 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 #ifndef HIVEMIND_NO_LOCAL_BYPASS
 	if(!memcmp(s->dwords, to->dwords, 18 /* Everything except MTU */)){
 		// Zero-copy loopback shortcut
-		tls.packet_on_heap = len;
-		_fire_pipe(s, to->id, msg, len);
+		struct _tls_packet_detach d = {.packet_on_heap = len};
+		_fire_pipe(s, to->id, msg, len, &d);
 		return;
 	}
 #endif
@@ -292,8 +318,8 @@ void hivemind_quit(hivemind_server_t* s, hivemind_generic_fn_t on_close, const c
 	else oc->filename[0] = '\0';
 	s->oc = oc;
 	x_socket_t h = s->handle;
-	if(atomic_load_explicit(&s->vq_flag, memory_order_relaxed)){
-		vqueue_post(&s->vq, vqueue_alloc(&s->vq, 0));
+	if(atomic_load_explicit(&s->vq_flag, memory_order_acquire)){
+		vqueue_post(&s->vq_block->q, vqueue_alloc(&s->vq_block->q, 0));
 	}
 	tsan_fence(memory_order_release);
 	x_udp_close(h);

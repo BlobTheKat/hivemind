@@ -8,6 +8,8 @@ const server = new HivemindServer({
 		const key = crypto.getRandomValues(new Uint8Array(32))
 		return fs.writeFile('../.master.key', key).then(() => key)
 	}),
+	networkBypassPrefixV4: 32,
+	networkBypassPrefixV6: 128
 })
 await server.listen(3331, '127.0.0.1', '', '127.0.0.1')
 console.log('\x1b[32mListening on :%d\x1b[m', server.address().port)

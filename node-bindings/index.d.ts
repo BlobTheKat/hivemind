@@ -8,7 +8,11 @@ export class HivemindServer{
 		maxPartition?: number,
 		selfAddress?: string,
 		selfPort?: number,
-		selfMtu?: number /*,
+		selfMtu?: number,
+		encryptionBypassPrefixV4?: number,
+		encryptionBypassPrefixV6?: number,
+		networkBypassPrefixV4?: number,
+		networkBypassPrefixV6?: number, /*,
 		path?: string*/
 	})
 	address(): {address: string, port: number, family: "IPv4" | "IPv6"}

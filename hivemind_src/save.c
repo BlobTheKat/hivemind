@@ -159,7 +159,7 @@ static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz
 }
 
 static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(void*,void*), const char* save){
-	struct _buf_being_built b;
+	struct _tls_buf_being_built b;
 	size_t pipe_top = atomic_load_explicit(&s->pipes_heap_i, memory_order_relaxed);
 	size_t pipec = pipe_top - atomic_load_explicit(&s->deleted_pipes, memory_order_relaxed);
 	if(save){
@@ -207,6 +207,15 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 	for(size_t i = 0; i < buckets; i++){
 		struct _hivemind_remote* state = r[i];
 		while(state){
+			if(state->bypass_type & 2){
+				struct _hivemind_remote_vq* state_vq = (struct _hivemind_remote_vq*)state;
+				vqueue_close(&state_vq->q);
+				assert(!state_vq->ref);
+				struct _hivemind_remote* n = state->next;
+				free(state);
+				state = n;
+				continue;
+			}
 			uint64_t rl = _time_lock_acq(&state->recv_last_used);
 			uint64_t sl = _time_lock_acq(&state->send_last_used);
 			assert(!state->recv_unlocked_ref && !state->send_unlocked_ref);

@@ -16,14 +16,14 @@
 #ifndef NDEBUG
 	// Reimplement assert bc it's funny
 	#if defined(__clang__) || defined(__GNUC__)
-		#define __assert(expr, msg, ...) (void)(__builtin_expect(!(expr), 0)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__builtin_trap(),0))
+		#define _dbg_assert(expr, msg, ...) (void)(__builtin_expect(!(expr), 0)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__builtin_trap(),0))
 		#define soft_assert(expr) (void)(__builtin_expect(!(expr),0)&&(__builtin_debugtrap(),0))
 	#else
 		#include <intrin.h>
-		#define __assert(expr, msg, ...) (void)(!(expr)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__fastfail(FAST_FAIL_FATAL_APP_EXIT),0))
+		#define _dbg_assert(expr, msg, ...) (void)(!(expr)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__fastfail(FAST_FAIL_FATAL_APP_EXIT),0))
 		#define soft_assert(expr) (void)(!(expr)&&(__debugbreak(),0))
 	#endif
-	#define assert(...) __assert(__VA_ARGS__,#__VA_ARGS__)
+	#define assert(...) _dbg_assert(__VA_ARGS__,#__VA_ARGS__)
 	#define DEBUG 1
 	#ifdef NO_SOFT_ASSERT
 		#undef soft_assert

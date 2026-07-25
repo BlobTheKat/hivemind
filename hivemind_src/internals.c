@@ -209,6 +209,11 @@ struct _open_close_data{
 	char filename[];
 };
 
+struct _hivemind_vq{
+	_Atomic size_t ref;
+	vqueue_t q;
+};
+
 typedef struct hivemind_server_t hivemind_server_t;
 struct hivemind_server_t{
 	union{
@@ -247,7 +252,7 @@ struct hivemind_server_t{
 	atomic(hivemind_server_t*) next, *prevp;
 	x_socket_t handle;
 	uint32_t first_id[5];
-	vqueue_t vq;
+	struct _hivemind_vq* vq_block;
 	alignas(256) char end_[];
 };
 

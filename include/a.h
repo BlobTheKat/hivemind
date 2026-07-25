@@ -546,7 +546,7 @@ static inline uint64_t thread_now(void){
 		void* addr2 = (char*)addr-off; off <<= 3; \
 		check {\
 		uint32_t v = atomic_load_explicit((volatile _Atomic uint32_t*) addr2, memory_order_relaxed); \
-		uint32_t v2 = v&m | (uint32_t)(val)<<off; \
+		uint32_t v2 = (v&m) | (uint32_t)(val)<<off; \
 		if(v != v2) return; \
 		syscall(SYS_futex, addr2, FUTEX_WAIT_BITSET_PRIVATE, v, 0, 0, 1<<off); }
 	
@@ -638,7 +638,7 @@ static inline uint64_t thread_now(void){
 		volatile _Atomic uint32_t* addr2 = (volatile _Atomic uint32_t*)((char*)addr-off); off <<= 3; \
 		check {\
 		uint32_t v = atomic_load_explicit(addr2, memory_order_relaxed); \
-		uint32_t v2 = v&m | (uint32_t)(val)<<off; \
+		uint32_t v2 = (v&m) | (uint32_t)(val)<<off; \
 		if(v != v2) return; \
 		_atomic_futex32(addr2, v); \
 		uint32_t v3 = atomic_load_explicit(addr2, memory_order_relaxed)^v; \
