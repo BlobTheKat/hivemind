@@ -1,80 +1,84 @@
 #pragma once
 #ifdef __cplusplus
+#define _Alignas alignas
 extern "C" {
 #endif
 #include "x.h"
 
-// [IP]/port/mtu/time/rand_b64
+// [IP]/[port]/[mtu]/[time]/[rand_b64][QOS]
 // See `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`
-static const size_t HIVEMIND_PIPE_STR_MAX_LEN = 89;
+static const size_t HIVEMIND_PIPE_STR_MAX_LEN = IP_STR_MAX_LEN + /* port, mtu */ 12 + /* time */ 18 + /* rand_b64 */ 19 + /*QOS*/ 1;
 
+#ifndef _HIVEMIND_NO_STRUCT_DEFINITION
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
-typedef struct{
-	union{
-#ifdef __cplusplus
-		alignas(16)
-#else
-		_Alignas(16)
-#endif
-		char __bytes[256];
-		struct{
-			// IP address returned by the reflection test, which is used to determine the public IP when constructing pipes. Note that this may be an IPv4-mapped IPv6 address. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
-			ip_addr_t addr;
-			// Port and MTU used when constructing pipes, all in little-endian. These values can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
-			// ```c
-			// union{
-			// 	struct{  uint16_t port_le, mtu_le;  };
-			// 	uint32_t port_mtu_packed_le;
-			// 	struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; };
-			// };
-			// ```
-			union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; }; };
+typedef struct{ union{
+	_Alignas(16) char bytes_[256];
+	struct{
+		// IP address returned by the reflection test, which is used to determine the public IP when constructing pipes. Note that this may be an IPv4-mapped IPv6 address. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
+		ip_addr_t addr;
+		// Port and MTU used when constructing pipes, all in little-endian. These values can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
+		// ```c
+		// union{
+		// 	struct{  uint16_t port_le, mtu_le;  };
+		// 	uint32_t port_mtu_packed_le;
+		// 	struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; };
+		// };
+		// ```
+		union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; struct{ uint8_t port_lo, port_hi, mtu_lo, mtu_hi; }; };
 
-			// Encryption bypass allows hivemind to avoid encrypting traffic within an internal network, saving both CPU and a small amount of bandwidth.
-			// To prevent data corruption, accidental replays, etc..., a checksum is still enforced for every packet (specifically, CRC64) as well as other policies similar to encrypted traffic, the main difference being that these policies are only designed to avoid accidental mishaps. A malicious actor with access to your internal network can cause a lot more issues than just that of confidentiality (e.g Denial of service, Message/ack forgery, etc...)
-			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables encryption bypass
-			// The default is /128 for IPv6 (Match IP but port can differ) and /32 for IPv4 (ditto), effectively enabling encryption bypass for traffic to the same machine
-			// This setting should be identical between servers that expect to use encryption bypass. Using different settings may lead to one server rejecting packets sent by another, either because received traffic is expected to be encrypted but isn't, or vice versa.
-			// See also: `network_bypass_prefix_v6`, `network_bypass_prefix_v4`
-			uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
-			// Network bypass allows hivemind to avoid the kernel's network stack, instead using vqueue, a copyless IPC protocol utilizing shared memory, saving a lot of CPU
-			// Queue identifiers are derived from the receiver IP/port
-			// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables network bypass
-			// The default is 255 for IPv6 (Match IP and port exactly) and 255 for IPv4 (ditto), effectively disabling network bypass
-			// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.
-			// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send`)
-			// See also: `encryption_bypass_prefix_v6`, `encryption_bypass_prefix_v4`
-			uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
-			// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
-			void* udata;
-			// How long a connection is "remembered" for, in microseconds. Key exchanges are relatively cheap so this affects memory usage more than performance
-			// This value dictates the longest that a network partition can last before delivery guarantees become invalid.
-			// This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
-			uint64_t state_lifetime;
-		};
-		// Combined IP address, port and MTU used when constructing pipes. This is a view over the exact same memory as the `addr`, `port_le` and `mtu_le` fields. The same write restrictions apply.
-		uint32_t dwords[5];
+		// Encryption bypass allows hivemind to avoid encrypting traffic within an internal network, saving both CPU and a small amount of bandwidth.
+		// To prevent data corruption, accidental replays, etc..., a checksum is still enforced for every packet (specifically, CRC64) as well as other policies similar to encrypted traffic, the main difference being that these policies are only designed to avoid accidental mishaps. A malicious actor with access to your internal network can cause a lot more issues than just that of confidentiality (e.g Denial of service, Message/ack forgery, etc...)
+		// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables encryption bypass
+		// The default is /128 for IPv6 (Match IP but port can differ) and /32 for IPv4 (ditto), effectively enabling encryption bypass for traffic to the same machine
+		// This setting should be identical between servers that expect to use encryption bypass. Using different settings may lead to one server rejecting packets sent by another, either because received traffic is expected to be encrypted but isn't, or vice versa.
+		// See also: `network_bypass_prefix_v6`, `network_bypass_prefix_v4`
+		uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
+		// Network bypass allows hivemind to avoid the kernel's network stack, instead using vqueue, a copyless IPC protocol utilizing shared memory, saving a lot of CPU
+		// Queue identifiers are derived from the receiver IP/port
+		// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables network bypass
+		// The default is 255 for IPv6 (Match IP and port exactly) and 255 for IPv4 (ditto), effectively disabling network bypass
+		// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.
+		// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send`)
+		// See also: `encryption_bypass_prefix_v6`, `encryption_bypass_prefix_v4`
+		uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
+		// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
+		void* udata;
+		// How long a connection is "remembered" for, in microseconds. Key exchanges are relatively cheap so this affects memory usage more than performance
+		// This value dictates the longest that a network partition can last before delivery guarantees become invalid.
+		// This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
+		uint64_t state_lifetime;
 	};
-} hivemind_server_t;
+	// Combined IP address, port and MTU used when constructing pipes. This is a view over the exact same memory as the `addr`, `port_le` and `mtu_le` fields. The same write restrictions apply.
+	uint32_t dwords[5];
+}; } hivemind_server_t;
 _Static_assert(sizeof(hivemind_server_t) == 256, "");
+#endif
 
 // 40-byte struct representing a pipe. This is an aggregate struct, you can pass it around, reconstruct it, etc. All fields are public and ABI-stable. The `id` field is a random 160-bit identifier that is used to distinguish pipes with the same address. Note that fields are all in little-endian format, this means the byte-for-byte representation is identical on all machine, allowing you to safely serialize and deserialize pipes with e.g `memcpy()`. If you want a nicer human-readable format, see `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`.
 typedef struct hivemind_pipe_t{ union{
 	struct{
 		ip_addr_t addr;
-		uint16_t port_le, mtu_le;
+		union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; };
 		uint32_t id[5];
 	};
 	uint32_t dwords[10];
 	uint8_t bytes[40];
 }; } hivemind_pipe_t;
+_Static_assert(_Alignof(hivemind_pipe_t) <= 4, "");
 _Static_assert(sizeof(hivemind_pipe_t) == 40, "");
 
 typedef void (*hivemind_generic_fn_t)(void*);
 typedef void (*hivemind_on_msg_fn_t)(void*, const uint8_t*, size_t, void*);
-typedef void* (*hivemind_pipe_restore_fn_t)(void*, uint8_t*, size_t);
+typedef void* (*hivemind_pipe_restore_fn_t)(void*, const uint8_t*, size_t);
 typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
+
+typedef enum hivemind_pipe_qos_t{
+	HIVEMIND_QOS_REALTIME = 0,
+	HIVEMIND_QOS_FASTER = 1,
+	HIVEMIND_QOS_SLOWER = 2,
+	HIVEMIND_QOS_BACKGROUND = 3
+} hivemind_pipe_qos_t;
 
 // See `hivemind_start()`
 static const ip_addr_t HIVEMIND_WAN_V4 = {.words={0,0,0,0,0,0xffff,0x0808,0x0808}}; // ::ffff:8.8.8.8
@@ -89,30 +93,32 @@ void hivemind_init(hivemind_server_t* server, const uint8_t master_key[32], hive
 // Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
 // If you would like to supply your own address, port, MTU or any combination of those, you can write to the corresponding fields in the server struct after `hivemind_init()` and before `hivemind_start()`, and they will be used instead of the results from the reflection test. When all 3 are provided before `hivemind_start()`, the reflection test is skipped and the field is unused (in any other case, passing `{0}` may fail).
 // You may also optionally load the server state from a file (`char* filename`). This will restore all pipes and connections from a previous `hivemind_quit()` that saved the state to that same file. This feature is useful for essential services that should not be disconnected from your network due to e.g a periodic machine restart. If `filename` is not `NULL`, the `pipe_restore` function may be called any number of times with any pipe-associated data that was serialized on last quit. The data passed to the function invocation is a temporary buffer, you may write within its bounds. It is discarded once the server starts. The buffer is also guaranteed to be aligned to at least 4 bytes.
+// Calls to `pipe_restore` are serialised with respect to each other
 bool hivemind_start(hivemind_server_t* server, remote_t where, ip_addr_t reflect_test, /*nullable*/ const char* filename, hivemind_pipe_restore_fn_t pipe_restore);
 // Quit the server, optionally saving state to a file. The `on_close` callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
 // Optionally provide a file to save the state to, and a pipe finalization callback. If the callback is specified, it will be called for every remaining pipe on the server at the time of being stopped. Within this callback, it is possible to serialize each pipe's state using the `hivemind_request_buffer` function.
 // Note that the `pipe_finish` callback, if not `NULL`, will be called even if `filename == NULL`. In such case, any calls to `hivemind_request_buffer` will return `NULL`, indicating that state is not being serialized.
+// Calls to `pipe_finish` are serialised with respect to each other and to `on_close`
 void hivemind_quit(hivemind_server_t* server, hivemind_generic_fn_t on_close, /*nullable*/ const char* filename, hivemind_pipe_finish_fn_t pipe_finish);
 
 // See `hivemind_quit`. Calling this function outside of the `pipe_finish` callback is undefined behavior.
-// This function returns a buffer of the specified size. Any data written to this buffer before the callback returns will be saved to disk and passed to the `pipe_restore` callback of `hivemind_start` the next time the server is started. This function may be called more than once, to request a bigger (or smaller) allocation. The new buffer will contain the contents of the old buffer (any new bytes are uninitialized). This typically does not involve a copy.
+// This function returns a buffer of the specified size. Any data written to this buffer before the callback returns will be saved to disk and passed to the `pipe_restore` callback of `hivemind_start` the next time the server is started. This function may be called more than once, to request a bigger (or smaller) allocation. The new buffer will contain the contents of the old buffer (any new bytes are uninitialized). This typically does not involve a copy. If this function is never called, the pipe is not saved and `pipe_restore` will not be called at all. To save a pipe with no associated data, call this function with the sz parameter `0`.
+// This function will always return `NULL` if state saving is disabled (i.e `NULL` was passed to `filename` in `hivemind_quit`).
 uint8_t* hivemind_request_buffer(size_t sz);
 
 // Detach a received packet, so it can be safely modified, and accessed after the callback returns. You must call `hivemind_packet_free()` on the returned pointer once you are done with it. The returned pointer may or may not be the same as the input pointer, however you should not use the input pointer after calling this function. Note that there are still no alignment guarantees on the returned pointer.
 // This function very rarely needs to actually copy the packet. Most of the time it just marks the packet as detached, so that it is not freed after your callback returns.
-// Calling this function outside of a callback invocation is undefined behavior
+// Calling this function outside of a callback invocation is undefined behavior.
 uint8_t* hivemind_packet_detach(const uint8_t* packet);
 // Free a detached packet. You must call this function on the pointer returned by `hivemind_packet_detach()` once you are done with the packet. Much like `free()`, this function also accepts null pointers and is a no-op in that case.
-// Can be called at any time after `hivemind_packet_detach()`, even from another thread (this must be at least minimally synchronized, e.g acq/rel).
+// Can be called at any time after `hivemind_packet_detach()`, even from another thread (this must be at least minimally synchronized, e.g acquire/release).
 void hivemind_packet_free(const uint8_t* packet);
 
-// By default, a callback invocation guarantees the current pipe is available (at least until the callback returns). To offer this guarantee, `hivemind_close_pipe()` may block until callbacks are done. If you want to release this guarantee early, you can call `hivemind_pipe_unlock()`.
-// This primarily serves protect you from nasty use-after-frees, as even reference counting on its own may not always be enough (you may have freed your userdata between when the packet was accepted and when your callback increments the refcount).
-// For the example of refence counting, you can increment the refcount, then call `hivemind_pipe_unlock()`. Doing this, when concurrently receiving a message and closing the pipe, guarantees one of two things will happen:
-// 1. `hivemind_close_pipe()` blocks until `hivemind_pipe_unlock()` is called, and the closer thread will see the new refcount
-// 2. `hivemind_close_pipe()` is early enough and the message is rejected, your message callback was never invoked.
-// Calling this function outside of a callback invocation is undefined behavior
+// By default, a callback invocation guarantees both that the current pipe remains available, and enforces message order even when multiple messages are processed on different threads. To offer this guarantee, calls are serialized against each other and against `hivemind_close_pipe()`, which may cause unnecessary blocking. If you want to release this serialization early in the callback, you can call `hivemind_pipe_unlock()`.
+// A typical pattern is to queue the message, then call `hivemind_pipe_unlock()`. Doing this, when concurrently receiving messages and potentially closing the pipe, guarantees that queued order is the same as the pipe's logical order, and that when freeing, one of two things will happen:
+// 1. `hivemind_close_pipe()` blocks until all remaining `hivemind_pipe_unlock()`s are called, and the closer thread will see pending messages and know not to free the associated (user) data yet.
+// 2. `hivemind_close_pipe()` happens early enough and the message is rejected, your message callback was never invoked, no use-after-free.
+// Calling this function outside of a callback invocation is undefined behavior.
 void hivemind_pipe_unlock();
 
 // Send a message to the given pipe. The message is guaranteed to be delivered as long as the pipe is not closed, and there is no network partition longer than the state cutoff, as defined by the receiver. Messages larger than the minimum MTU (minus overhead) will be fragmented (fragmentation primarily affects worst-case latency).
@@ -121,7 +127,7 @@ void hivemind_pipe_unlock();
 void hivemind_send(hivemind_server_t* server, const hivemind_pipe_t* to, const uint8_t* msg, size_t len);
 
 // Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
-void hivemind_create_pipe(hivemind_server_t* server, hivemind_pipe_t* pipe, void* udata);
+void hivemind_create_pipe(hivemind_server_t* server, hivemind_pipe_t* pipe, void* udata, hivemind_pipe_qos_t qos);
 // Close a pipe. The return value is the `udata` pointer that was passed to `hivemind_create_pipe()`, or null if the pipe was not found. If the same pipe is closed more than once, only one of them will return the userdata, all others will return null. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
 void* hivemind_close_pipe(hivemind_server_t* server, const hivemind_pipe_t* pipe);
 

@@ -132,7 +132,7 @@ static char* x_dir_next(x_folder_list_t dir);
 static void x_dir_close(x_folder_list_t dir);
 
 // Open a file from a null-terminated string specifying the pathname
-static x_file_t x_open(const char* name);
+static x_file_t x_open(const char* name, unsigned flags);
 
 // Move a file atomically
 static bool x_move(const char* old_name, const char* new_name);
@@ -250,9 +250,13 @@ static void x_zerobytes(void* data, size_t len);
 #ifdef _WIN32
 #include <malloc.h>
 
-static x_file_t x_open(const char* name){
-	return (x_file_t) CreateFileA(name, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-		OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_POSIX_SEMANTICS | FILE_FLAG_RANDOM_ACCESS,
+static const unsigned X_FILE_READONLY = 1;
+static const unsigned X_FILE_SEQUENTIAL = 2;
+static const unsigned X_FILE_READ_THROUGH = FILE_FLAG_NO_BUFFERING<<2;
+static const unsigned X_FILE_WRITE_THROUGH = FILE_FLAG_WRITE_THROUGH<<2;
+static x_file_t x_open(const char* name, unsigned flags){
+	return (x_file_t) CreateFileA(name, GENERIC_READ | (flags&1 ? 0 : GENERIC_WRITE), FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+		flags&1 ? OPEN_EXISTING : OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | FILE_FLAG_POSIX_SEMANTICS | (flags&2 ? FILE_FLAG_SEQUENTIAL_SCAN : FILE_FLAG_RANDOM_ACCESS) | (flags>>2),
 	NULL);
 }
 
@@ -431,8 +435,32 @@ static void x_zerobytes(void* data, size_t len){
 #include <stdlib.h>
 #include <ifaddrs.h>
 
-static x_file_t x_open(const char* name){
-	return (x_file_t) open(name, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+static const unsigned X_FILE_READONLY = O_RDWR | O_CREAT; // (O_RDWR | O_CREAT) ^ X_FILE_READONLY == O_RDONLY
+static const unsigned X_FILE_SEQUENTIAL = O_CLOEXEC; // flag that doesn't need to be AND'd out when passing to open()
+#ifdef O_DIRECT
+	static const unsigned X_FILE_READ_THROUGH = O_DIRECT;
+	#define _X_OPEN_FLAG_MASK ~0
+#else
+	static const unsigned X_FILE_READ_THROUGH = O_ASYNC; // flag that we're not gonna use
+	#define _X_OPEN_FLAG_MASK ~O_ASYNC
+#endif
+static const unsigned X_FILE_WRITE_THROUGH = O_SYNC;
+static x_file_t x_open(const char* name, unsigned flags){
+	x_file_t f = (x_file_t) open(name, ((O_RDWR | O_CREAT) ^ (flags&_X_OPEN_FLAG_MASK)) | O_CLOEXEC, 0666);
+#undef _X_OPEN_FLAG_MASK
+	if(flags & X_FILE_SEQUENTIAL){
+#ifdef POSIX_FADV_SEQUENTIAL
+		posix_fadvise(f, 0, 0, POSIX_FADV_SEQUENTIAL);
+#else
+		fcntl(f, F_RDAHEAD, 1);
+#endif
+	}
+#if !defined(O_DIRECT) && defined(F_NOCACHE)
+	if(flags & X_FILE_READ_THROUGH){
+		fcntl(f, F_NOCACHE, 1);
+	}
+#endif
+	return f;
 }
 
 static uint64_t x_getsize(x_file_t fd){

@@ -11,9 +11,9 @@ template<typename T> struct alignas(T) slot{
 	constexpr operator T&(){return *(const T*)value;}
 
 	template<typename T2 = T, typename... X>
-	constexpr void construct(X... a){ new (value) T2(a...); }
+	constexpr void construct(X&&... a){ new (value) T2(std::forward<X>(a)...); }
 	template<typename T2 = T, typename T3 = T, typename... X>
-	constexpr void replace(X... a){ ((T3*)value)->~T(); new (value) T2(a...); }
+	constexpr void replace(X&&... a){ ((T3*)value)->~T(); new (value) T2(std::forward<X>(a)...); }
 	template<typename T2 = T>
 	constexpr void destruct(){ ((T2*)value)->~T2(); }
 	constexpr T copy() const{return *(T*)value;}

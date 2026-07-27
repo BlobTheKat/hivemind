@@ -55,6 +55,7 @@ static bool _fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t
 }
 
 static void _append_pipe(hivemind_server_t* s, uint32_t id[5], void* udata){
+	if(!udata) return;
 	bool excl = false;
 	retry:
 	shared_lock_acquire(&s->pipes_lock);

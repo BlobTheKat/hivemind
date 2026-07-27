@@ -26,7 +26,7 @@ Supported platforms
 #include <hivemind.h>
 
 void load_master_key(uint8_t key[32], const char* filename){
-	x_file_t fd = x_open(filename);
+	x_file_t fd = x_open(filename, 0);
 	if(x_getsize(fd) < 32){
 		// Generate new key
 		x_randombytes(key, 32);
@@ -55,7 +55,7 @@ int main(){
 
 	hivemind_pipe_t pipe;
 	// The pipe type is contiguous, trivially copyable and has a platform-independent binary representation.
-	hivemind_create_pipe(&h_server, &pipe, /*userdata*/ 0);
+	hivemind_create_pipe(&h_server, &pipe, /*userdata*/ NULL, HIVEMIND_QOS_REALTIME);
 
 	// Potentially on another machine/instance
 	const char* data = "Hello, world!";

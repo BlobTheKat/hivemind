@@ -11,6 +11,9 @@
 #include "utils.h"
 #define VQUEUE_IMPL
 #include <vqueue.h>
+#define _HIVEMIND_NO_STRUCT_DEFINITION
+typedef struct hivemind_server_t hivemind_server_t;
+#include <hivemind.h>
 
 static_assert(CHAR_BIT == 8);
 
@@ -214,7 +217,6 @@ struct _hivemind_vq{
 	vqueue_t q;
 };
 
-typedef struct hivemind_server_t hivemind_server_t;
 struct hivemind_server_t{
 	union{
 		struct{
@@ -347,18 +349,6 @@ static void _time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
 	*ref = 0;
 }
 
-typedef union{
-	struct{
-		ip_addr_t addr;
-		union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; };
-		uint32_t id[5];
-	};
-	uint32_t dwords[10];
-} hivemind_pipe_t;
-
-static_assert(alignof(hivemind_pipe_t) <= 4);
-static_assert(sizeof(hivemind_pipe_t) == 40);
-
 #define SEND_BURST 6000
 #define SEND_TICK 2000 // 2ms in useconds
 
@@ -369,9 +359,6 @@ static inline void _resolve_seq(uint64_t* lo, uint32_t* hi, uint32_t seq){
 	*lo = lo2 + ((lo2-lo1+(0x80000000))&0xFFFFFFFF00000000);
 	*hi += (lo2>>32)-(lo1>>32);
 }
-
-// [IP]/port/mtu/time/rand_b64
-static const size_t HIVEMIND_PIPE_STR_MAX_LEN = IP_STR_MAX_LEN + /* port, mtu */ 12 + /* time */ 18 + /* rand_b64 */ 19;
 
 static inline void _hivemind_remote_cleanup_recv(struct _hivemind_remote* state){
 	if(state->cur_packet) free(state->cur_packet), state->cur_packet = 0;

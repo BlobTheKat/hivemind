@@ -38,7 +38,7 @@ void on_done(void* _){
 int main(){
 	srand48((long)mono_now());
 	uint64_t start = mono_now();
-	x_file_t f = x_open(".master.key");
+	x_file_t f = x_open(".master.key", 0);
 	if(x_getsize(f) < 32){
 		x_randombytes(MASTER_KEY, 32);
 		x_write(f, 0, MASTER_KEY, 32);
@@ -56,7 +56,7 @@ int main(){
 	printf("\x1b[32mServer started in %.2fms\x1b[33m\nRecv address: [%s]:%d MTU=%d\x1b[m\n", (mono_now() - start) / 1000.f, addr, le16toh(ser.port_le), le16toh(ser.mtu_le));
 
 	hivemind_pipe_t recpt;
-	hivemind_create_pipe(&ser, &recpt, 0);
+	hivemind_create_pipe(&ser, &recpt, NULL, HIVEMIND_QOS_REALTIME);
 	x_randombytes(data, sizeof(data));
 	/*for(uint32_t i = 0; i < sizeof(data); i+=4){
 		*(uint32_t*)(data+i) = htonl(i>>2);

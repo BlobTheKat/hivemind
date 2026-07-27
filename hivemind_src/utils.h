@@ -335,6 +335,36 @@ noinline char* _array_buffer_grow(array_buffer_t* obj, char* dat, size_t* cap, s
 	return dat2;
 }
 
+noinline void _array_buffer_shrink(array_buffer_t* obj){
+	char* dat2; size_t used2 = obj->size;
+	char* dat = obj->data;
+	if(used2 <= sizeof(char*)){
+		obj->cap_exp = 0;
+		dat2 = obj->data_i;
+	}else{
+		dat2 = obj->data = (char*) malloc(1ull<<(int)(obj->cap_exp = size_magn((used2-1)|31)));
+		if unlikely(!dat2) abort();
+	}
+	memcpy(dat2, dat, used2);
+	free(dat);
+}
+
+templated void array_buffer_setsize_garbage(array_buffer_t* obj, size_t sz){
+	size_t cap = obj->cap_exp, size = obj->size;
+	if(sz > size){
+		char* dat;
+		if(!cap) cap = sizeof(char*), dat = obj->data_i;
+		else cap = 1ull<<(int)cap, dat = obj->data;
+		if(sz > cap)
+			_array_buffer_grow(obj, dat, &cap, sz);
+		obj->size = sz;
+	}else if(sz < size){
+		obj->size = sz;
+		if(cap && sz <= (1ull<<(int)(cap-2)))
+			_array_buffer_shrink(obj);
+	}
+}
+
 templated void* array_buffer_push_garbage(array_buffer_t* obj, size_t sz){
 	size_t cap = obj->cap_exp; char* dat;
 	if(!cap) cap = sizeof(char*), dat = obj->data_i;
@@ -366,20 +396,6 @@ templated void array_buffer_push_memset(array_buffer_t* obj, int v, size_t sz){
 		dat = _array_buffer_grow(obj, dat, &cap, len2);
 	obj->size = len2;
 	memset(dat+size, v, sz);
-}
-
-noinline void _array_buffer_shrink(array_buffer_t* obj){
-	char* dat2; size_t used2 = obj->size;
-	char* dat = obj->data;
-	if(used2 <= sizeof(char*)){
-		obj->cap_exp = 0;
-		dat2 = obj->data_i;
-	}else{
-		dat2 = obj->data = (char*) malloc(1ull<<(int)(obj->cap_exp = size_magn((used2-1)|31)));
-		if unlikely(!dat2) abort();
-	}
-	memcpy(dat2, dat, used2);
-	free(dat);
 }
 
 templated void array_buffer_pop_discard(array_buffer_t* obj, size_t sz){

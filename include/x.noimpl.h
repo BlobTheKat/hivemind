@@ -105,7 +105,7 @@ static char* x_dir_next(x_folder_list_t dir);
 static void x_dir_close(x_folder_list_t dir);
 
 // Open a file from a null-terminated string specifying the pathname
-static x_file_t x_open(const char* name);
+static x_file_t x_open(const char* name, unsigned flags);
 
 // Move a file atomically
 static bool x_move(const char* old_name, const char* new_name);

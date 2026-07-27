@@ -1,10 +1,5 @@
 #include "tasks.c"
 
-typedef void (*hivemind_generic_fn_t)(void*);
-typedef void (*hivemind_on_msg_fn_t)(void*, const uint8_t*, size_t, void*);
-typedef void* (*hivemind_pipe_restore_fn_t)(void*, uint8_t*, size_t);
-typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
-
 void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_msg_fn_t on_msg){
 	memset(s, 0, sizeof(*s));
 	s->on_msg = on_msg;
@@ -34,12 +29,13 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 		if(!s->port_le) s->port_le = htole16(where.port);
 		if(!s->mtu_le) s->mtu_le = htole16(where.mtu);
 	}
+	s->mtu_le &= htole16(~3);
 	// 64MB total. Can queue 32MB every SEND_TICK which is 16GB/s or 128Gbps (realistically a bit less but this is still more than good enough)
 	if(!x_udp_opts(sock, 32768 * 1024, 32768 * 1024))
 		goto err;
 	
 	if(from){
-		x_file_t f = x_open(from);
+		x_file_t f = x_open(from, X_FILE_READONLY | X_FILE_SEQUENTIAL | X_FILE_READ_THROUGH);
 		if(f == X_FILE_INVALID) goto restore_failed;
 		x_remove(from);
 		size_t sz = x_getsize(f);
@@ -127,8 +123,8 @@ void hivemind_pipe_unlock(){
 	if(d->pipe_lock) lock_release(d->pipe_lock, 1), d->pipe_lock = 0;
 }
 
-void hivemind_create_pipe(hivemind_server_t* s, hivemind_pipe_t* pipe, void* udata){
-	pipe->addr = s->addr; pipe->port_mtu_packed_le = s->port_mtu_packed_le;
+void hivemind_create_pipe(hivemind_server_t* s, hivemind_pipe_t* pipe, void* udata, hivemind_pipe_qos_t qos){
+	pipe->addr = s->addr; pipe->port_mtu_packed_le = s->port_mtu_packed_le | htole32((qos&3)<<16);
 	_alloc_id(s, pipe->id, epoch_now()/MILLISECOND_US);
 	_append_pipe(s, pipe->id, udata);
 }
@@ -157,7 +153,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		abort();
 	}
 #endif
-	unsigned port = le16toh(to->port_le), mtu = le16toh(to->mtu_le), omtu;
+	unsigned port = le16toh(to->port_le), mtu = le16toh(to->mtu_le)&~3, omtu;
 	struct _hivemind_remote* state = _hivemind_state_find(s, to->addr, (uint16_t)port, _HIVEMIND_FIND_CREATE | _HIVEMIND_FIND_INCLUDE_VQ);
 	if(state->bypass_type & 2){
 		struct _hivemind_remote_vq *state_vq = (struct _hivemind_remote_vq*) state;
@@ -331,7 +327,8 @@ static const uint8_t b64_alphabet2[128] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 size_t hivemind_pipe_to_string(const hivemind_pipe_t* pipe, char out[HIVEMIND_PIPE_STR_MAX_LEN]){
 	ip_to_string(pipe->addr, out);
 	size_t i = strlen(out);
-	snprintf(out+i, HIVEMIND_PIPE_STR_MAX_LEN-i, "/%u/%u/%llu/", le16toh(pipe->port_le), le16toh(pipe->mtu_le), (unsigned long long)le32toh(pipe->id[0])<<32|((unsigned long long)le32toh(pipe->id[1])&0xFFFFFF));
+	uint16_t mtu = le16toh(pipe->mtu_le);
+	snprintf(out+i, HIVEMIND_PIPE_STR_MAX_LEN-i, "/%u/%u/%llu/", le16toh(pipe->port_le), mtu&~3, (unsigned long long)le32toh(pipe->id[0])<<32|((unsigned long long)le32toh(pipe->id[1])&0xFFFFFF));
 	i += strlen(out+i+7)+7;
 	uint8_t* rand = (uint8_t*)pipe->id + 7;
 	for(int j = 0; j < 4; j++){
@@ -340,6 +337,7 @@ size_t hivemind_pipe_to_string(const hivemind_pipe_t* pipe, char out[HIVEMIND_PI
 		out[i++] = b64_alphabet[x>>6&63]; out[i++] = b64_alphabet[x&63];
 	}
 	out[i++] = b64_alphabet[rand[12]>>2]; out[i++] = b64_alphabet[(rand[12]<<4)&63];
+	out[i++] = 'A' + (mtu&3);
 	out[i] = 0;
 	return i;
 }
@@ -355,10 +353,11 @@ bool hivemind_pipe_from_string(hivemind_pipe_t* pipe, const char in[HIVEMIND_PIP
 	str[i] = '\0';
 	pipe->addr = ip_from_string(str);
 	unsigned port, mtu, off; unsigned long long tim;
-	char id_b64[19];
-	if(sscanf(str+i+1, "%u/%u/%llu/%18s%n", &port, &mtu, &tim, id_b64, &off) != 4) return false;
+	char id_b64[19], qos;
+	if(sscanf(str+i+1, "%u/%u/%llu/%18s%c%n", &port, &mtu, &tim, id_b64, &qos, &off) != 4) return false;
 	if((off+i+1) != len) return false;
-	pipe->port_le = htole16(port); pipe->mtu_le = htole16(mtu);
+	qos &= ~32; // cheap tolower
+	pipe->port_le = htole16(port); pipe->mtu_le = htole16((mtu&~3) | (qos >= 'A' && qos <= 'D' ? qos-'A' : 0));
 	for(int i = 0; i < 4; i++){
 		uint32_t x = (uint32_t)(b64_alphabet2[id_b64[i<<2]&127]<<18|b64_alphabet2[id_b64[i<<2|1]&127]<<12|b64_alphabet2[id_b64[i<<2|2]&127]<<6|b64_alphabet2[id_b64[i<<2|3]&127]);
 		str[i*3+3] = (char)(x>>16); str[i*3+4] = (char)(x>>8); str[i*3+5] = (char)x;

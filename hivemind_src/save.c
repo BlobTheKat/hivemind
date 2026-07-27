@@ -15,7 +15,7 @@ static inline void _write32(uint8_t* p, uint32_t x){
 	p[0] = (uint8_t)(x>>24); p[1] = (uint8_t)(x>>16); p[2] = (uint8_t)(x>>8); p[3] = (uint8_t)x;
 }
 
-static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz, void* (*pipe_restore)(void*,uint8_t*,size_t)){
+static inline bool _hivemind_load(hivemind_server_t* s, uint8_t* data, size_t sz, hivemind_pipe_restore_fn_t pipe_restore){
 	// Poly1305 checksum. By using the master key as the poly tag, we can verify the master key hasn't changed, without storing it or a hash of it in the file. Very cool
 	uint32_t tag[4], mkey[8];
 	for(unsigned i = 0; i < 8; i++) mkey[i] = htole32(s->master_key[i]);
@@ -183,12 +183,16 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 			continue;
 		}
 		if(save){
-			memcpy(array_buffer_push_garbage(&b.buf, 28), p->id, 20);
-			b.sz0 = array_buffer_size(&b.buf);
-			if(pipe_finish) pipe_finish(s->udata, p->udata);
-			size_t sz = array_buffer_size(&b.buf) - b.sz0;
-			_write64((uint8_t*)array_buffer_data(&b.buf)+b.sz0+20, sz);
-			if(sz&3) array_buffer_push_garbage(&b.buf, 4-(sz&3));
+			b.sz0 = array_buffer_size(&b.buf)+28;
+			pipe_finish(s->udata, p->udata);
+			size_t sz = array_buffer_size(&b.buf);
+			if(sz >= b.sz0){
+				sz -= b.sz0;
+				uint8_t* data = (uint8_t*)array_buffer_data(&b.buf) + b.sz0-28;
+				memcpy(data, p->id, 20);
+				_write64(data+20, sz);
+				if(sz&3) array_buffer_push_garbage(&b.buf, ~sz&3);
+			}
 		}else if(pipe_finish) pipe_finish(s->udata, p->udata);
 	}
 	if(save) tls.buf_being_built = 0;
@@ -331,7 +335,7 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 		for(unsigned i = 0; i < 8; i++) mkey[i] = htole32(s->master_key[i]);
 		uint8_t* buf8 = (uint8_t*)array_buffer_data(&b.buf);
 		Poly1305(buf8+16, array_buffer_size(&b.buf)-16, (uint8_t*)mkey, buf8);
-		x_file_t f = x_open(save);
+		x_file_t f = x_open(save, X_FILE_SEQUENTIAL);
 		if(f == X_FILE_INVALID) goto end;
 		if(x_setsize(f, 0))
 			x_write(f, 0, (uint8_t*)array_buffer_data(&b.buf), array_buffer_size(&b.buf));
@@ -344,7 +348,6 @@ static inline void _hivemind_finish(hivemind_server_t* s, void (*pipe_finish)(vo
 uint8_t* hivemind_request_buffer(size_t sz){
 	if(!tls.buf_being_built) return 0;
 	size_t sz0 = tls.buf_being_built->sz0;
-	if(sz > sz0) array_buffer_push_garbage(&tls.buf_being_built->buf, sz - sz0);
-	else if(sz < sz0) array_buffer_pop_discard(&tls.buf_being_built->buf, sz0 - sz);
+	array_buffer_setsize_garbage(&tls.buf_being_built->buf, sz0 + sz);
 	return (uint8_t*)array_buffer_data(&tls.buf_being_built->buf) + sz0;
 }

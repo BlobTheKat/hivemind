@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <limits.h>
+#include <stdbool.h>
 
 #define templated static inline
 
@@ -70,6 +71,8 @@ templated void ring_buffer_destroy(ring_buffer_t* obj);
 
 templated size_t array_buffer_size(array_buffer_t* obj);
 templated void* array_buffer_data(array_buffer_t* obj);
+
+templated void array_buffer_setsize_garbage(array_buffer_t* obj, size_t sz);
 
 templated void* array_buffer_push_garbage(array_buffer_t* obj, size_t sz);
 templated void array_buffer_push(array_buffer_t* obj, void* d, size_t sz);
