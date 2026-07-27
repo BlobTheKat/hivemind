@@ -11,7 +11,7 @@
 			"-fno-omit-frame-pointer", "-pthread",
 			"-fsanitize=address,undefined", "-flto",
 			"${workspaceFolder}/tests/hivemind_test.c",
-			"${workspaceFolder}/hivemind_src/main.c",
+			"${workspaceFolder}/src/main.c",
 			"-o", "${workspaceFolder}/tmp/test.out",
 			"-I${workspaceFolder}/include"
 		],
@@ -27,7 +27,7 @@
 			"-fno-omit-frame-pointer", "-pthread",
 			"-fsanitize=thread", "-DTSAN", "-flto",
 			"${workspaceFolder}/tests/hivemind_test.c",
-			"${workspaceFolder}/hivemind_src/main.c",
+			"${workspaceFolder}/src/main.c",
 			"-o", "${workspaceFolder}/tmp/test.out",
 			"-I${workspaceFolder}/include"
 		],
@@ -47,7 +47,7 @@
 			"-Wno-unused-parameter", "-Wno-strict-prototypes", "-Wno-newline-eof",
 			"-std=c11", "-march=native", "-pthread", "-flto",
 			"${workspaceFolder}/tests/hivemind_test.c",
-			"${workspaceFolder}/hivemind_src/main.c",
+			"${workspaceFolder}/src/main.c",
 			"-o", "${workspaceFolder}/tmp/test.out",
 			"-I${workspaceFolder}/include"
 		],

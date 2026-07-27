@@ -1,7 +1,7 @@
 NAPI_URL=https://raw.githubusercontent.com/nodejs/node-addon-api/refs/heads/main
 HIVEMIND_INCLUDE="../include ../vqueue"
 # Leave blank to dynamically link against hivemind (not recommended but maybe useful)
-HIVEMIND_SRC="../hivemind_src/main.c"
+HIVEMIND_SRC="../src/main.c"
 
 FLAGS="-Wno-vla -Wno-unused -Wno-deprecated -DNO_STDIO -DNDEBUG -flto -O3 -Wall -Wextra -Wno-unused -Wno-unused-parameter -Wno-unused-command-line-argument"
 [ -n "${EXTRA_FLAGS+x}" ] || [ "$(uname -s)" = "Darwin" ] || EXTRA_FLAGS="-fuse-ld=lld" # Flags that are ignored when not using clang
