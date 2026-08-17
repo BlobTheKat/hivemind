@@ -535,3 +535,9 @@ templated void exclusive_lock_downgrade(shared_lock_t* s){
 	lock_release(&s->s, LOCK_MAX-1);
 	lock_release(&s->x, 1);
 }
+
+static_assert(SIZE_MAX >= UINT32_MAX && SIZE_MAX <= UINT64_MAX);
+typedef uint64_t sfat_pointer_t;
+#define sfat_pack(p, s) ((uintptr_t)(p)<<16|(s))
+#define sfat_get(p) (uint8_t*)((uintptr_t)(p)>>16)
+#define sfat_size(p) ((uintptr_t)(p)&0xFFFF)

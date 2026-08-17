@@ -34,7 +34,7 @@
 			"name": "Linux",
 			"includePath": [
 				"${workspaceFolder}/include",
-				"/usr/include", "$HOME/.nvm/versions/node/*/include/node",
+				"/usr/include", "~/.nvm/versions/node/*/include/node",
 				"/usr/include/node" /* One of the two */
 			],
 			"defines": [],

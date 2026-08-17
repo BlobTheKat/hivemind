@@ -304,13 +304,13 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			}
 		}
 		// ref
-		uv_loop_s* loop;
-		int err;
+		uv_loop_t* loop;
+		napi_status err;
 		err = napi_get_uv_event_loop(info.Env(), &loop);
-		assert(err == 0, "napi_get_uv_event_loop");
-		err = uv_async_init(loop, &async_handle, async_cb);
+		assert(err == napi_ok, "napi_get_uv_event_loop");
+		int err2 = uv_async_init(loop, &async_handle, async_cb);
+		assert(!err2, "uv_async_init");
 		async_handle.data = this;
-		assert(err == 0, "uv_async_init");
 		if(!hivemind_start(&server_, r, test, path.size() ? path.c_str() : 0, path.size() ? (hivemind_pipe_restore_fn_t) &HivemindServerJS::revive_pipe : 0)){
 			uv_unref((uv_handle_t*)&async_handle);
 			Napi::Error::New(info.Env(), "Failed to execute 'listen' on 'HivemindServer': could not bind to address").ThrowAsJavaScriptException();

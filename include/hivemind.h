@@ -9,7 +9,7 @@ extern "C" {
 // See `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`
 static const size_t HIVEMIND_PIPE_STR_MAX_LEN = IP_STR_MAX_LEN + /* port, mtu */ 12 + /* time */ 18 + /* rand_b64 */ 19 + /*QOS*/ 1;
 
-#ifndef _HIVEMIND_NO_STRUCT_DEFINITION
+#ifndef _HV_NO_STRUCT_DEFINITION
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
 typedef struct{ union{

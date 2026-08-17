@@ -11,37 +11,37 @@
 #include "utils.h"
 #define VQUEUE_IMPL
 #include <vqueue.h>
-#define _HIVEMIND_NO_STRUCT_DEFINITION
+#define _HV_NO_STRUCT_DEFINITION
 typedef struct hivemind_server_t hivemind_server_t;
 #include <hivemind.h>
 
 static_assert(CHAR_BIT == 8);
 
-#define _hivemind_internal_clock() mono_now()
+#define _hv_internal_clock() mono_now()
 
 #define memcmp16(a, b) (((uint64_t)(a)[0]|(uint64_t)(a)[1]<<32) ^ ((uint64_t)(b)[0]|(uint64_t)(b)[1]<<32)) | \
 	(((uint64_t)(a)[2]|(uint64_t)(a)[3]<<32) ^ ((uint64_t)(b)[2]|(uint64_t)(b)[3]<<32))
 
-static inline void* _hivemind_alloc(size_t bytes){
+static inline void* _hv_alloc(size_t bytes){
 	void* addr = malloc(bytes);
 	if unlikely(!addr){
-		fputs("_hivemind_alloc(): Heap out of memory", stderr);
+		fputs("_hv_alloc(): Heap out of memory", stderr);
 		abort();
 	}
 	assert(!((uintptr_t)addr&7)); // Aligned
 	return addr;
 }
-static inline void* _hivemind_alloc_a(size_t bytes, size_t to){
+static inline void* _hv_alloc_a(size_t bytes, size_t to){
 	void* addr = aligned_alloc(to, bytes);
 	if unlikely(!addr){
-		fputs("_hivemind_alloc(): Heap out of memory", stderr);
+		fputs("_hv_alloc(): Heap out of memory", stderr);
 		abort();
 	}
 	return addr;
 }
 
 // Used by hashmaps
-static inline uint64_t _mix64(uint64_t x){
+static inline uint64_t _hv_mix64(uint64_t x){
 	x ^= x >> 30;
 	x *= 0xbf58476d1ce4e5b9ULL;
 	x ^= x >> 27;
@@ -50,31 +50,26 @@ static inline uint64_t _mix64(uint64_t x){
 	return x;
 }
 
-static inline uint64_t _mix64_addr(ip_addr_t addr, uint16_t port){
-	return _mix64(((uint64_t)addr.dwords[0]<<32|addr.dwords[1]) ^ _mix64((uint64_t)addr.dwords[2]<<32|addr.dwords[3]) ^ (port * 0x9e3779b97f4a7c15ull));
+static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
+	return _hv_mix64(((uint64_t)addr.dwords[0]<<32|addr.dwords[1]) ^ _hv_mix64((uint64_t)addr.dwords[2]<<32|addr.dwords[3]) ^ (port * 0x9e3779b97f4a7c15ull));
 }
 
-struct _send_packet{
-	struct _send_packet* next;
+struct _hv_send_packet{
+	struct _hv_send_packet* next;
+	uint64_t len4:14, resent:4, first:1, kex:1, time_lo:44;
 #if SIZE_MAX == UINT64_MAX
 	uint32_t seq_m;
 #endif
-	uint64_t len_p:14, resent:5, first:1, time_lo:44;
-	alignas(4) uint8_t payload[];
+	uint32_t payload4[];
 };
 
-static inline size_t lseqof(struct _send_packet* p, bool bypass){
-	unsigned ex = bypass?0:8;
-	if((p->len_p&(1|ex))!=1) return 0;
-	size_t seq = (size_t)le32toh(*(uint32_t*)(p->payload+8+ex));
-	#if SIZE_MAX >= UINT64_MAX
-		seq |= (size_t)p->seq_m<<32;
-	#endif
+static inline size_t _hv_lseqof(struct _hv_send_packet* p, bool bypass){
+	if(p->kex) return 0;
+	size_t seq = (size_t)le32toh(*(uint32_t*)(p->payload4+(bypass?2:4)));
+#if SIZE_MAX >= UINT64_MAX
+	seq |= (size_t)p->seq_m<<32;
+#endif
 	return seq;
-}
-
-static inline unsigned lenof(struct _send_packet* p){
-	return (unsigned)(p->len_p<<2);
 }
 
 #ifdef __SIZEOF_INT128__
@@ -82,9 +77,9 @@ typedef signed __int128 int128_t;
 typedef unsigned __int128 uint128_t;
 #endif
 
-struct _hivemind_remote_vq{
-	// Identical to start of struct _hivemind_remote
-	struct _hivemind_remote* next;
+struct _hv_remote_vq{
+	// Identical to start of struct _hv_remote
+	struct _hv_remote* next;
 	union{
 		remote_t remote;
 		struct{
@@ -93,18 +88,18 @@ struct _hivemind_remote_vq{
 		};
 	};
 	atomic(uint64_t) vq_last_used;
-	struct _hivemind_remote** prevp;
+	struct _hv_remote** prevp;
 	vqueue_t q;
 };
 
-struct _hivemind_remote{
+struct _hv_remote{
 	// Field order is specific and to avoid an entire cache line of wasted padding and reduce false sharing
 	// This layout is optimized for 64 bit pointers and size_t.
 
 	// == 1st cache line: infrequently written. This line needs to be quick to access across many threads since it's what's used to traverse the linked list ==
 
 	// Linked list structure for use in linked list hashmaps
-	struct _hivemind_remote* next;
+	struct _hv_remote* next;
 	// Used as key in hashmaps
 	union{
 		remote_t remote;
@@ -128,12 +123,11 @@ struct _hivemind_remote{
 	// cur_packet contains the currently-being-reconstructed packet, if any, and its length in cur_packet_left (if no packet is being reconstructed then cur_packet_left is undefined)
 	// recv_queue[0] contains the head of the currently-being-reconstructed (head = where data is appended). This replaces what would otherwise certainly be a null (since the next packet that hasn't yet been received). If no packet is being reconstructed, then this is null (or if there are no packets in the queue then the queue is completely empty)
 	ring_buffer_t recv_queue;
-	uint8_t* cur_packet; size_t cur_packet_left; // see recv_queue
 
 	// ---
 
-	// Back pointer for `_hivemind_meta.servers` linked list
-	struct _hivemind_remote** prevp;
+	// Back pointer for `_hv_meta.servers` linked list
+	struct _hv_remote** prevp;
 	// Key derivation timestamp to thwart replay attacks. Forgotten after state cutoff (all key derivations older than that window are rejected regardless)
 	uint64_t key_derived_when;
 	// Derived local key for incoming packets (and to sign ACKs)
@@ -141,14 +135,14 @@ struct _hivemind_remote{
 
 	// ACK coalescing stuff
 	// Linked list of all remotes with unsent acks
-	struct _hivemind_remote* unsent_ack_next;
+	struct _hv_remote* unsent_ack_next;
 	// ACK coalescing stuff
 	// ack_coal_i = current index in ack_coal_buf
-	// ack_coal_tim0 = _hivemind_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
+	// ack_coal_tim0 = _hv_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
 	uint64_t ack_coal_tim0:56, ack_coal_i:8;
 	// ---
 
-	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hivemind_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
+	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hv_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
 	uint32_t ack_coal_buf[15];
 
 	// 4 bytes left
@@ -156,13 +150,13 @@ struct _hivemind_remote{
 	// == 5-6th cache line: frequently written by send/drain logic ==
 
 	// Timestamp when last packet was sent. Also used as a lock and init flag (1 = uninit, 0 = locked)
-	// See _time_lock_acq/_time_lock_rel
+	// See _hv_time_lock_acq/_hv_time_lock_rel
 	alignas(CACHE_LINE) atomic uint64_t send_last_used;
 	// While unmasking a packet, or performing another expensive operation, it is not beneficial to unnecessarily hold on to the send_last_used lock. We temporarily release that lock, incrementing this value to make sure the remote is not GC'd in between. Since this value is only touched inside the lock, it does not need to be atomic
 	uint32_t send_unlocked_ref;
 	uint32_t send_seq_hi; uint64_t send_seq_lo; // Protocol sequence numbers
 	// Linked list of undrained queues
-	struct _hivemind_remote* undrained_next;
+	struct _hv_remote* undrained_next;
 	// send_key is moved to the first cache line to save 1 cache line on the struct size
 	// It's infrequently written so this should be fine performance-wise
 	
@@ -173,7 +167,7 @@ struct _hivemind_remote{
 	// ---
 	// Linked list of all sent packets, in the order that they were last sent (and therefore the same order that they should be resent if needed).
 	// `send_order_end` is not a pointer to the last packet but to the last packet's next field (or a pointer to `send_order_start` if the list is empty). `*send_order_end` should always be `NULL`
-	struct _send_packet *send_order_start, **send_order_end;
+	struct _hv_send_packet *send_order_start, **send_order_end;
 	// Rolling window for tracking how many packets can be sent how fast
 	uint64_t send_window;
 	// Packed tightly for memory efficiency
@@ -195,15 +189,15 @@ struct _hivemind_remote{
 // We don't need it to be 384 exactly but we wanna know if it ever jumps up
 // In that case, either reshuffle fields to keep it same size or increase this assert to the new size
 // Struct alignment >= CACHE_LINE so even a single poorly placed field can bump the size dramatically
-static_assert(sizeof(struct _hivemind_remote) <= 384, "sizeof(_hivemind_remote) changed");
+static_assert(sizeof(struct _hv_remote) <= 384, "sizeof(_hv_remote) changed");
 
-struct _hivemind_pipe{
+struct _hv_pipe{
 	atomic uintptr_t next;
 	uint32_t id[5]; lock_t ref;
 	void* udata;
 };
 
-struct _open_close_data{
+struct _hv_open_close_data{
 	void (*cb)(void*);
 	union{
 		void* (*restore_cb)(void*, uint8_t*, size_t);
@@ -212,7 +206,7 @@ struct _open_close_data{
 	char filename[];
 };
 
-struct _hivemind_vq{
+struct _hv_vq{
 	_Atomic size_t ref;
 	vqueue_t q;
 };
@@ -246,35 +240,35 @@ struct hivemind_server_t{
 	_Atomic uint8_t vq_flag;
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
-	struct _hivemind_remote** remote_buckets;
+	struct _hv_remote** remote_buckets;
 	void (*on_msg)(void*, const uint8_t*, size_t, void*);
 	atomic(size_t) pipes_heap_i, deleted_pipes;
 	atomic(uintptr_t)* pipes_data;
-	struct _open_close_data* oc;
+	struct _hv_open_close_data* oc;
 	atomic(hivemind_server_t*) next, *prevp;
 	x_socket_t handle;
 	uint32_t first_id[5];
-	struct _hivemind_vq* vq_block;
+	struct _hv_vq* vq_block;
 	alignas(256) char end_[];
 };
 
 static_assert(sizeof(hivemind_server_t) == 256);
 
 #ifdef __SIZEOF_INT128__
-static void _alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
+static void _hv_alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
 	uint128_t v = atomic_fetch_add_explicit(&s->_id, 1, memory_order_relaxed);
 	out[0] = htole32(t>>24); out[1] = htole32(t&0xFFFFFF|v>>96<<24);
 	out[2] = htole32(v>>64); out[3] = htole32(v>>32);
 	out[4] = htole32(v);
 }
-static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
+static void _hv_nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint128_t v = atomic_load_explicit(&s->_id, memory_order_relaxed);
 	out[0] = htole32(t>>24); out[1] = htole32(t&0xFFFFFF|v>>96<<24);
 	out[2] = htole32(v>>64); out[3] = htole32(v>>32);
 	out[4] = htole32(v);
 }
-static inline uint64_t _alloc_id_short(hivemind_server_t* s){
+static inline uint64_t _hv_alloc_id_short(hivemind_server_t* s){
 	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint8_t spin = 32;
 	uint64_t lo = (uint64_t)atomic_fetch_add_explicit(&s->_id, 1, memory_order_relaxed);
@@ -282,7 +276,7 @@ static inline uint64_t _alloc_id_short(hivemind_server_t* s){
 }
 #else
 #warning No 16-byte atomic primitive detected. If they are available, consider compiling with appropriate flags, e.g -mcx16. Falling back to lock-based approach
-static void _alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
+static void _hv_alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
 	uint8_t spin = 32;
 	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
 	uint64_t lo = s->_id_lo++, hi = s->_id_hi; if(lo == -1ull) s->_id_hi = hi+1;
@@ -291,7 +285,7 @@ static void _alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
 	out[2] = htole32(hi); out[3] = htole32(lo>>32);
 	out[4] = htole32(lo);
 }
-static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
+static void _hv_nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint8_t spin = 32;
 	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
@@ -301,7 +295,7 @@ static void _nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	out[2] = htole32(hi); out[3] = htole32(lo>>32);
 	out[4] = htole32(lo);
 }
-static inline uint64_t _alloc_id_short(hivemind_server_t* s){
+static inline uint64_t _hv_alloc_id_short(hivemind_server_t* s){
 	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint8_t spin = 32;
 	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
@@ -315,7 +309,7 @@ static inline uint64_t _alloc_id_short(hivemind_server_t* s){
 // 0 = locked
 // 1 = uninitialized (serves as a sentinel value for "never used before")
 // >1 = unlocked and contains the time of last use. The time is updated on most lock releases (but not all, e.g if the lock was acquired but the resource wasn't "touched")
-static inline uint64_t _time_lock_acq(atomic(uint64_t)* ptr){
+static inline uint64_t _hv_time_lock_acq(atomic(uint64_t)* ptr){
 	uint64_t l;
 	for(;;){
 		l = atomic_exchange_explicit(ptr, 0, memory_order_acquire);
@@ -323,8 +317,8 @@ static inline uint64_t _time_lock_acq(atomic(uint64_t)* ptr){
 		thread_yield();
 	}
 }
-// Peek at the value of a time lock without acquiring it. See `_time_lock_acq`
-static inline uint64_t _time_lock_peek(atomic(uint64_t)* ptr){
+// Peek at the value of a time lock without acquiring it. See `_hv_time_lock_acq`
+static inline uint64_t _hv_time_lock_peek(atomic(uint64_t)* ptr){
 	uint64_t l;
 	for(;;){
 		l = atomic_load_explicit(ptr, memory_order_acquire);
@@ -332,43 +326,50 @@ static inline uint64_t _time_lock_peek(atomic(uint64_t)* ptr){
 		thread_yield();
 	}
 }
-// Release a time lock and set the last used time. See `_time_lock_acq`
-static inline void _time_lock_rel(atomic(uint64_t)* ptr, uint64_t l){
+// Release a time lock and set the last used time. See `_hv_time_lock_acq`
+static inline void _hv_time_lock_rel(atomic(uint64_t)* ptr, uint64_t l){
 	atomic_store_explicit(ptr, l, memory_order_release);
 }
 
-static void _time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
-	uint64_t l = _time_lock_acq(ptr);
+static void _hv_time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
+	uint64_t l = _hv_time_lock_acq(ptr);
 	if(!*ref) return;
 	*ref |= 0x80000000;
 	retry:
-	_time_lock_rel(ptr, l);
-	thread_sleep(1); // Very strong yield
-	_time_lock_acq(ptr);
+	_hv_time_lock_rel(ptr, l);
+	thread_yield();
+	_hv_time_lock_acq(ptr);
 	if(*ref & 0x7FFFFFFF) goto retry;
 	*ref = 0;
 }
 
-#define SEND_BURST 6000
-#define SEND_TICK 2000 // 2ms in useconds
+#define _HV_SEND_BURST 6000
+#define _HV_SEND_TICK 2000 // 2ms in useconds
 
 // Resolve a 96-bit sequence number from the low 32 bits and a reference sequence number
 // The returned sequence number is within +/- 2^31 of the reference sequence number
-static inline void _resolve_seq(uint64_t* lo, uint32_t* hi, uint32_t seq){
+static inline void _hv_resolve_seq(uint64_t* lo, uint32_t* hi, uint32_t seq){
 	uint64_t lo1 = *lo, lo2 = (lo1 & 0xFFFFFFFF00000000) | seq;
 	*lo = lo2 + ((lo2-lo1+(0x80000000))&0xFFFFFFFF00000000);
 	*hi += (lo2>>32)-(lo1>>32);
 }
 
-static inline void _hivemind_remote_cleanup_recv(struct _hivemind_remote* state){
-	if(state->cur_packet) free(state->cur_packet), state->cur_packet = 0;
+static inline void _hv_remote_cleanup_recv(struct _hv_remote* state, bool bypass){
+	ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, SIZE_MAX);
+	sfat_pointer_t ptr;
+	while(ring_iterator_next(&it, &ptr, sizeof(ptr), true)){
+		unsigned sz = sfat_size(ptr);
+		void* ptr = sfat_get(ptr);
+		if(!sz || sz == 0xFFFF){ if(ptr) free(ptr); }
+		else if(sz < 0xFFFE) free((const uint8_t*)ptr - (bypass ? 12 : 20));
+	}
 	ring_buffer_clear(&state->recv_queue);
 }
 
-static void _hivemind_remote_cleanup_send(struct _hivemind_remote* state){
-	struct _send_packet* p = state->send_order_start;
+static void _hv_remote_cleanup_send(struct _hv_remote* state){
+	struct _hv_send_packet* p = state->send_order_start;
 	while(p){
-		struct _send_packet* p2 = p->next;
+		struct _hv_send_packet* p2 = p->next;
 		free(p); p = p2;
 	}
 	state->send_order_start = 0; state->send_order_end = &state->send_order_start;
@@ -380,9 +381,3 @@ static void _hivemind_remote_cleanup_send(struct _hivemind_remote* state){
 	ring_buffer_clear(&state->send_queue);
 	state->unsent_i = 0;
 }
-
-static_assert(SIZE_MAX <= UINT64_MAX);
-typedef uint64_t sfat_pointer_t;
-#define sfat_pack(p, s) ((uintptr_t)(p)<<16|(s))
-#define sfat_get(p) (uint8_t*)((uintptr_t)(p)>>16)
-#define sfat_size(p) ((uintptr_t)(p)&0xFFFF)
