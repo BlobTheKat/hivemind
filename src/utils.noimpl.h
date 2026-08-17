@@ -9,7 +9,7 @@
 typedef struct ring_buffer_t{
 	char* data;
 	size_t cap_exp:8;
-	size_t l:(sizeof(size_t)*CHAR_BIT)-8; size_t used;
+	size_t l:sizeof(size_t)*CHAR_BIT-8; size_t used;
 } ring_buffer_t;
 typedef struct ring_iterator_t{
 	char *head, *end;
@@ -29,7 +29,7 @@ typedef struct ring_iterator_t{
 #if SIZE_MAX == UINT64_MAX
 typedef struct array_buffer_t{
 	char* data;
-	size_t cap_exp:8, len:(sizeof(size_t)*CHAR_BIT)-8;
+	size_t cap_exp:8, len:sizeof(size_t)*CHAR_BIT-8;
 } array_buffer_t;
 #else
 typedef struct array_buffer_t{
@@ -65,7 +65,6 @@ templated ring_iterator_t ring_buffer_iterator(ring_buffer_t* obj, size_t i, siz
 
 templated size_t ring_iterator_next(ring_iterator_t* obj, void* d, size_t sz, bool aligned);
 
-templated void ring_buffer_clear(ring_buffer_t* obj);
 templated void ring_buffer_destroy(ring_buffer_t* obj);
 
 
@@ -88,7 +87,6 @@ templated array_iterator_t array_buffer_iterator(array_buffer_t* obj, size_t i, 
 
 templated size_t array_iterator_next(array_iterator_t* obj, void* d, size_t sz);
 
-templated void array_buffer_clear(array_buffer_t* obj);
 templated void array_buffer_destroy(array_buffer_t* obj);
 
 #undef templated

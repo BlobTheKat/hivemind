@@ -312,7 +312,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, -1ull);
 					assert(it.remaining == wsz);
 					struct _hv_send_packet* p;
-					size_t i = 0, unsent_i = state->unsent_i;
+					size_t i = 0;
 					uint64_t lo0 = state->send_seq_lo; uint32_t hi = state->send_seq_hi;
 					uint64_t lo1 = lo0 - wsz/sizeof(struct _hv_send_packet*);
 					if(lo1>lo0) hi--;
@@ -323,11 +323,8 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 						}
 						unsigned sz = (p->len4<<2) - (bypass ? 8 : 16);
 						if(bypass && p->first) sz += 4;
-						if(i < unsent_i){
-							p = p->next;
-							if(!bypass)
-								_hv_unencrypt_packet(chacha_in, hi, lo1, p);
-						}
+						p = p->next;
+						if(!bypass) _hv_unencrypt_packet(chacha_in, hi, lo1, p);
 						uint8_t* p2 = array_buffer_push_garbage(&b.buf, sz+4);
 						_hv_write32(p2, sz | (uint32_t)(p->first<<16) | (uint32_t)(p->kex<<17)); // Upper 14 bits reserved
 						memcpy(p2+4, p->payload4+(bypass?2:4), sz);
@@ -337,7 +334,8 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 			}
 			_hv_remote_cleanup_recv(state, bypass);
 			_hv_remote_cleanup_send(state);
-			state->handle = X_SOCKET_INVALID;
+			// Signal to undrained/unsent_ack that this state is no longer needed and should be freed once done
+			state->prevp = 0;
 			struct _hv_remote* n = state->next;
 			if(!state->undrained_next && !state->unsent_ack_next){
 				free(state);

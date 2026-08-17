@@ -202,6 +202,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	struct _hv_send_packet* packet = 0;
 	// plen excludes the header which is kinda sus
 	unsigned plen = 0, true_plen = 0;
+	uint32_t pipe_last;
 	if unlikely(l == 1 || (tim-l) > s->state_lifetime){
 		if unlikely(ring_buffer_size(&state->send_queue)) _hv_remote_cleanup_send(state);
 		if(bypass){
@@ -229,18 +230,19 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		plen -= 2;
 		packet->kex = 1;
 		state->send_seq_hi = state->send_seq_lo = 0;
-	}
+	}else pipe_last = _hv_find_pipe_last(state, to->id, (uint32_t)seq_lo);
 	seq_lo = state->send_seq_lo; seq_hi = state->send_seq_hi;
 	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi = seq_hi+1;
-	if(state->unsent_i == ring_buffer_size(&state->send_queue)){
+	state->packet_offset += num_packets;
+	if(ring_buffer_size(&state->send_queue) == state->packet_offset*sizeof(struct _hv_send_packet*)){
 		state->rtt_gate_hi = 0;
 		state->rtt_gate_lo = 8;
 	}
-	ring_buffer_push_memset(&state->send_queue, 0, num_packets*sizeof(struct _hv_send_packet*), false);
 	_hv_time_lock_rel(&state->send_last_used, tim);
+	size_t dwords = 0;
 	struct _hv_send_packet** packets = (struct _hv_send_packet**)(num_packets <= 8 ? alloca(num_packets*sizeof(struct _hv_send_packet*)) : _hv_alloc(num_packets*sizeof(struct _hv_send_packet*))), **ppackets = packets;
 	if likely(!plen){
-		bool long_encoding = len >= 65535;
+		bool long_encoding = len >= 65535 || (uint32_t)seq_lo - pipe_last > (bypass ? 0xFE : 0xFFFF);
 		unsigned first_mtu = mtu, needed = long_encoding?8:6;
 		if(bypass){
 			num_packets += (num_packets*mtu-pad_len)<needed;
@@ -259,15 +261,16 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 			if(long_encoding){
 				packet->payload4[true_plen-1] = htole32(0xFFFF0000 | len);
 				packet->payload4[true_plen-2] = htole32(len>>16);
+				packet->payload4[true_plen-3] = htole32(pipe_last);
 			}else{
-				packet->payload4[true_plen-1] = htole32(len); // TODO: insert pipe_last
+				packet->payload4[true_plen-1] = htole32(len|((uint32_t)seq_lo - pipe_last)<<16);
 			}
 		}else if(long_encoding){
 			packet->payload4[true_plen-1] = htole32(0xFFFF0000 | len);
 			packet->payload4[true_plen-2] = htole32(len >> 16);
-			packet->payload4[true_plen-3] = htole32(0);
+			packet->payload4[true_plen-3] = htole32(pipe_last);
 		}else{
-			packet->payload4[true_plen-1] = htole32(len << 16);
+			packet->payload4[true_plen-1] = htole32(len << 16|((uint32_t)seq_lo - pipe_last));
 		}
 		plen -= long_encoding ? 3 : 1;
 	}
@@ -294,10 +297,13 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 	pad_len -= plen;
 	packet->len4 = true_plen;
+	dwords += true_plen;
 #if SIZE_MAX == UINT64_MAX
 	packet->seq_m = seq_lo>>32;
 #endif
 	if(!++seq_lo) seq_hi++;
+	if(ppackets != packets)
+		(*(ppackets-1))->next = packet;
 	*ppackets++ = packet;
 	if(pad_len) goto more;
 	assert((size_t)(ppackets - packets) == num_packets);
@@ -305,7 +311,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	_hv_time_lock_acq(&state->send_last_used);
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _hv_send_packet*);
-	ring_buffer_set(&state->send_queue, i, packets, sizeof(struct _hv_send_packet*) * num_packets, false);
+	_hv_add_to_send_pipe(state, to, packets[0], &(*(ppackets-1))->next, dwords);
 	_hv_drain_writes(state, tim = _hv_internal_clock());
 	if(!state->undrained_next){
 		struct _hv_remote* n = atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed);

@@ -41,7 +41,7 @@ static bool _hv_fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint
 	}
 	struct _hv_pipe* p = (struct _hv_pipe*) atomic_load_explicit(&s->pipes_data[hash&((1<<bexp)-1)], memory_order_acquire);
 	while(p){
-		if(p->id[0]==id[0] && p->id[1]==id[1] && p->id[2]==id[2] && p->id[3]==id[3] && p->id[4]==id[4])
+		if(!memcmp(p->id, id, 20))
 			break;
 		p = (struct _hv_pipe*)(atomic_load_explicit(&p->next, memory_order_acquire)&-2ull);
 	}
@@ -121,7 +121,7 @@ static void* _hv_kill_pipe(hivemind_server_t* s, const uint32_t id[5]){
 		atomic(uintptr_t)* op = &s->pipes_data[hash&(b-1)];
 		struct _hv_pipe* p = (struct _hv_pipe*) atomic_load_explicit(op, memory_order_acquire);
 		while(p){
-			if(p->id[0]==id[0] && p->id[1]==id[1] && p->id[2]==id[2] && p->id[3]==id[3] && p->id[4]==id[4])
+			if(!memcmp(p->id, id, 20))
 				break;
 			p = (struct _hv_pipe*)(atomic_load_explicit(op = &p->next, memory_order_acquire)&-2ull);
 		}
@@ -222,7 +222,8 @@ static inline uint64_t _hv_keyless_sig2(hivemind_server_t* s, const remote_t* fr
 }
 
 static void _hv_ram_packed_kex(hivemind_server_t* s, const uint32_t pipeid[static restrict 5], struct _hv_remote* state, uint32_t out_packet[static restrict 5]){
-	_hv_keyless_sig(s, &state->remote, out_packet, state->send_key, 0, 0);
+	remote_t to = {.addr = state->addr, .port = state->port};
+	_hv_keyless_sig(s, &to, out_packet, state->send_key, 0, 0);
 }
 
 static uint64_t _hv_ram_packed_kex_verify(hivemind_server_t* s, const remote_t* from, uint32_t out_key[static restrict 8], const uint32_t in_packet[static restrict 5]){
@@ -352,7 +353,6 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 	}else{
 		p = (struct _hv_remote*) _hv_alloc_a(sizeof(struct _hv_remote), alignof(struct _hv_remote));
 		memset(p, 0, sizeof(*p));
-		p->handle = s->handle;
 		p->server_mtu = le16toh(s->mtu_le)>>2;
 		p->bypass_type = _hv_addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
 		// 0.1us = ~10MB/s = ~80Mbps
@@ -426,4 +426,54 @@ static inline void _hv_crcinitless_packet_finish(hivemind_server_t* s, const rem
 	*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
 	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len + 1);
 	soft_assert(send_success);
+}
+
+struct _hv_send_pipe* _hv_add_to_send_pipe(struct _hv_remote* state, hivemind_pipe_t* pipe, struct _hv_send_packet* nfirst, struct _hv_send_packet** nlast, size_t dwords){
+	uint64_t hash = _hv_mix64((uint64_t)pipe->id[1]<<32|pipe->id[4])^_hv_mix64((uint64_t)pipe->id[2]<<32|pipe->id[3]);
+	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
+	struct _hv_send_pipe* pipe_state;
+	check:
+	if(!pos){
+		pipe_state = array_buffer_push_garbage(&state->pipes_with_unsent, sizeof(struct _hv_send_pipe));
+		memcpy(pipe_state->id, pipe->id, 20);
+		pipe_state->start = 0;
+		pipe_state->end = &pipe_state->start;
+		pipe_state->dependency_lo = 0xFFFFFFFF00000000;
+		pipe_state->dependency_hi = 0xFFFFFFFF;
+		pipe_state->queued = (size_t)le16toh(pipe->mtu_le) << (sizeof(size_t)*CHAR_BIT-2);
+		pipe_state->next = pos0;
+		hash_table_put(&state->pipes_with_unsent_b, hash, array_buffer_size(&state->pipes_with_unsent));
+	}else{
+		pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos - sizeof(struct _hv_send_pipe));
+		if(memcmp(pipe->id, pipe_state->id, 20)){
+			pos = pipe_state->next;
+			goto check;
+		}
+	}
+	pipe_state->queued += dwords;
+	if(*nlast = pipe_state->start){
+		pipe_state->end = nlast;
+	}
+	pipe_state->start = nfirst;
+}
+uint32_t _hv_find_pipe_last(struct _hv_remote* state, uint32_t id[5], uint32_t self){
+	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
+	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
+	struct _hv_send_pipe* pipe_state;
+	check:
+	if(!pos) return self;
+	pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos - sizeof(struct _hv_send_pipe));
+	if(memcmp(id, pipe_state->id, 20)){
+		pos = pipe_state->next;
+		goto check;
+	}
+#ifdef __SIZEOF_INT128__
+	unsigned __int128 cur = ((__int128)state->send_seq_lo | (__int128)state->send_seq_hi<<64);
+	unsigned __int128 last = ((__int128)pipe_state->dependency_lo | (__int128)pipe_state->dependency_hi<<64);
+	return cur-last < 0x80000000 ? (uint32_t)pipe_state->dependency_lo : self;
+#else
+	bool small_diff = state->send_seq_lo-pipe_state->dependency_lo < 0x80000000;
+	if(pipe_state->dependency_hi == state->send_seq_hi-1 && pipe_state->dependency_lo < state->send_seq_lo) small_diff = false;
+	return small_diff ? (uint32_t)pipe_state->dependency_lo : self;
+#endif
 }

@@ -4,11 +4,12 @@
 deprecate("Debug")
 static void check_send(struct _hv_remote* state){
 	bool bypass = state->bypass_type == 1;
-	if(!state->unsent_i)
+	size_t sz = ring_buffer_size(&state->send_queue);
+	if(!sz)
 		assert(state->send_order_end == &state->send_order_start);
-	size_t lo = state->send_seq_lo-ring_buffer_size(&state->send_queue)/sizeof(struct _hv_send_packet**);
+	size_t lo = state->send_seq_lo-state->packet_offset;
 	bool f = !state->send_seq_lo&&!state->send_seq_hi;
-	for(size_t j = 0; j < state->unsent_i; j += sizeof(struct _hv_send_packet**)){
+	for(size_t j = 0; j < sz; j += sizeof(struct _hv_send_packet**)){
 		struct _hv_send_packet** v2;
 		ring_buffer_get(&state->send_queue, j, &v2, sizeof(v2), true);
 		if(v2) assert(lo == _hv_lseqof(*v2, bypass));

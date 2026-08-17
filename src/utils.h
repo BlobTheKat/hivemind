@@ -91,15 +91,15 @@ static inline float discrete_log2f(float x){
 	return (float)(xi-1) + x*2.f-1.f;
 }
 
-#if SIZE_MAX == UINT64_MAX
+#if SIZE_MAX >= UINT64_MAX
 typedef struct ring_buffer_t{
 	union{ char* data; char data_i[sizeof(char*)]; };
 	size_t cap_exp:8;
-	size_t l:(sizeof(size_t)*CHAR_BIT)-8; size_t size;
+	size_t l:sizeof(size_t)*CHAR_BIT-8; size_t size;
 } ring_buffer_t;
 typedef struct ring_iterator_t{
 	char *head, *end;
-	size_t cap_exp:8, remaining:56;
+	size_t cap_exp:8, remaining:sizeof(size_t)*CHAR_BIT-8;
 } ring_iterator_t;
 static_assert(sizeof(ring_buffer_t) == sizeof(size_t) * 3);
 #else
@@ -295,10 +295,6 @@ templated size_t ring_iterator_next(ring_iterator_t* obj, void* d, size_t sz, bo
 	return obj->remaining -= sz;
 }
 
-templated void ring_buffer_clear(ring_buffer_t* obj){
-	if(obj->cap_exp) free(obj->data), obj->cap_exp = 0;
-	obj->size = obj->l = 0;
-}
 templated void ring_buffer_destroy(ring_buffer_t* obj){
 	if(obj->cap_exp) free(obj->data);
 	if(DEBUG) memset(obj, 0xDE, sizeof(*obj));
@@ -306,10 +302,10 @@ templated void ring_buffer_destroy(ring_buffer_t* obj){
 
 
 
-#if SIZE_MAX == UINT64_MAX
+#if SIZE_MAX >= UINT64_MAX
 typedef struct array_buffer_t{
 	union{ char* data; char data_i[sizeof(char*)]; };
-	size_t cap_exp:8, size:(sizeof(size_t)*CHAR_BIT)-8;
+	size_t cap_exp:8, size:sizeof(size_t)*CHAR_BIT-8;
 } array_buffer_t;
 static_assert(sizeof(array_buffer_t) == sizeof(size_t) * 2);
 #else
@@ -436,104 +432,296 @@ templated size_t array_iterator_next(array_iterator_t* obj, void* d, size_t sz){
 	return obj->remaining -= sz;
 }
 
-templated void array_buffer_clear(array_buffer_t* obj){
-	if(obj->cap_exp) free(obj->data), obj->cap_exp = 0;
-	obj->size = 0;
-}
 templated void array_buffer_destroy(array_buffer_t* obj){
 	if(obj->cap_exp) free(obj->data);
 	if(DEBUG) memset(obj, 0xDE, sizeof(*obj));
 }
 
 // A shared mutex. Any amount of threads may shared-acquire, only one thread at a time can exclusive-acquire, and not while any thread has the shared lock acquired. This is useful for many-readers-few-writers scenarios, where an exclusive mutex for read-only operations is excessive
-typedef struct{
-	// `s` is the shared lock flag, it starts at LOCK_MAX (lock_t is semaphore-style, acquire = decrement)
-	// `x` is the exclusive lock flag. It itself does not protect anything except the shared lock flag
-	// This is because multiple threads trying to acquire LOCK_MAX on `s` can cause deadlocks
-	// Also shared locks can check/wait on the value of `x` before entering, this makes exclusive acquires faster and fairer
-	// `x` needs to be ordered with respect to `s` but not with respect to what the whole lock is protecting
-	alignas(sizeof(lock_t)*2) lock_t s; lock_t x;
-} shared_lock_t;
+typedef lock_t shared_lock_t;
 static_assert(sizeof(shared_lock_t) <= CACHE_LINE); // if this was false that would be pretty insane
+
+#define SHARED_LOCK_MAX (LOCK_MAX>>1)
+#define SHARED_LOCK_EXCL_BIT (LOCK_MAX&~SHARED_LOCK_MAX)
 
 templated void shared_lock_init(shared_lock_t* s){
 	// lock_t is semaphore style, we specify how many slots we have
-	atomic_init(&s->s, LOCK_MAX);
-	atomic_init(&s->x, 1);
+	atomic_init(s, LOCK_MAX);
 }
 // Acquire the "shared" part of a shared lock. This will block if any thread is trying to or has already obtained an exclusive lock. This will also cause all future exclusive lock acquires to block until the shared lock is released
 templated void shared_lock_acquire(shared_lock_t* s){
-	lock_wait(&s->x, 1);
-	lock_acquire(&s->s, 1);
+	lock_wait_acquire(s, SHARED_LOCK_EXCL_BIT+1, 1);
 }
 // Wait for the "shared" part of a shared lock to become available, if it isn't. This will block if any thread is trying to or has already obtained an exclusive lock. No lock is acquired, another thread may immediately acquire the lock while this function returns, you should not call `shared_lock_release` after this.
 templated void shared_lock_wait(shared_lock_t* s){
-	lock_wait(&s->x, 1);
-	lock_wait(&s->s, 1);
+	lock_wait(s, SHARED_LOCK_EXCL_BIT+1);
 }
 // Try to acquire the "shared" part of a shared lock. This will return false if any thread is trying to or has already obtained an exclusive lock. See `shared_lock_acquire`
 templated bool shared_lock_try_acquire(shared_lock_t* s){
-	if(!lock_fetch_explicit(&s->x, memory_order_acquire)) return false;
-	return lock_try_acquire(&s->s, 1);
+	return lock_test_and_acquire(s, SHARED_LOCK_EXCL_BIT+1, 1);
 }
 // Release the "shared" part of a shared lock. Releasing more times than was acquired (i.e, calling this function when no shared part is currently acquired) is UB
 templated void shared_lock_release(shared_lock_t* s){
-	assert(lock_fetch(&s->s) < LOCK_MAX, "shared_lock_release() called on shared_lock_t with no shared part acquired");
-	lock_release(&s->s, 1);
+	assert((lock_fetch(s)&SHARED_LOCK_MAX) < SHARED_LOCK_MAX, "shared_lock_release() called on shared_lock_t with no shared part acquired");
+	lock_release(s, 1);
 }
 // Upgrade a "shared" lock to an exclusive one. This operation may be performed without ever releasing the shared part of the lock, in which case it will return `true`. Note that this cannot be guaranteed due to the possibility of deadlocks. This function avoids deadlocks by briefly dropping the shared part if necessary, in which case it will return `false`. In all cases, upgrading when no shared part was acquired to begin with is UB
 templated bool shared_lock_upgrade(shared_lock_t* s){
-	assert(lock_fetch(&s->s) < LOCK_MAX, "shared_lock_upgrade() called on shared_lock_t with no shared part acquired");
+	assert((lock_fetch(s)&SHARED_LOCK_MAX) < SHARED_LOCK_MAX, "shared_lock_upgrade() called on shared_lock_t with no shared part acquired");
 	bool f = true;
-	if(!lock_try_acquire(&s->x, 1)){
-		lock_release(&s->s, 1);
-		// Compiler reordering above and below operation could be a deadlock.
-		// If CPU reorders these, it is guaranteed to commit the release in bounded time, so the "deadlock" only lasts until then
-		static_memory_barrier(mb_write_any);
-		lock_acquire(&s->x, 1);
+	if(!lock_try_acquire(s, SHARED_LOCK_EXCL_BIT)){
+		lock_release(s, 1);
+		lock_wait_acquire(s, SHARED_LOCK_EXCL_BIT, SHARED_LOCK_EXCL_BIT);
 		f = false;
 	}
-	lock_acquire(&s->s, LOCK_MAX-f);
+	lock_acquire(s, (LOCK_MAX&~SHARED_LOCK_EXCL_BIT)-f);
 	return f;
 }
-// Try to upgrade a "shared" lock to an exclusive one. This operation is performed without ever releasing the shared part of the lock, in which case it will return `true`. If another thread owns the exclusive lock, there is a possibility of deadlocks, and the function will return false (it follows that this function cannot block on the exclusive lock, however it can block if other threads hold the shared part of the lock). In all cases, upgrading when no shared part was acquired to begin with is UB
+// Try to upgrade a "shared" lock to an exclusive one. This operation is performed without ever releasing the shared part of the lock. If another thread owns or is trying to obtain the exclusive lock, there is a possibility of deadlocks, and the function will return false (it follows that this function cannot block on the exclusive lock, however it can block if other threads hold the shared part of the lock). In all cases, upgrading when no shared part was acquired to begin with is UB
 templated bool shared_lock_try_upgrade(shared_lock_t* s){
-	assert(lock_fetch(&s->s) < LOCK_MAX, "shared_lock_upgrade() called on shared_lock_t with no shared part acquired");
-	if(!lock_try_acquire(&s->x, 1)) return false;
-	lock_acquire(&s->s, LOCK_MAX-1);
-	return true;
+	assert((lock_fetch(s)&SHARED_LOCK_MAX) < SHARED_LOCK_MAX, "shared_lock_upgrade() called on shared_lock_t with no shared part acquired");
+	return lock_try_acquire(&s, LOCK_MAX-1);
 }
 // Acquire the "exclusive" part of a shared lock. This will block if any thread is trying to or has already obtained an exclusive lock. This will also cause all future shared/exclusive lock acquires to block until the exclusive lock is released
 templated void exclusive_lock_acquire(shared_lock_t* s){
-	lock_acquire(&s->x, 1);
-	lock_acquire(&s->s, LOCK_MAX);
+	lock_wait_acquire(s, SHARED_LOCK_EXCL_BIT, SHARED_LOCK_EXCL_BIT);
+	lock_acquire(s, SHARED_LOCK_MAX);
 }
 // Wait for the "exclusive" part of a shared lock to become available. This will block if any thread is trying to or has already obtained an exclusive lock. No lock is acquired, another thread may immediately acquire the lock while this function returns, you should not call `exclusive_lock_release` after this.
 templated void exclusive_lock_wait(shared_lock_t* s){
-	lock_acquire(&s->x, 1);
-	lock_wait(&s->s, LOCK_MAX);
-	lock_release_explicit(&s->x, 1, memory_order_relaxed);
+	lock_wait_acquire(s, SHARED_LOCK_EXCL_BIT, SHARED_LOCK_EXCL_BIT);
+	lock_wait(s, SHARED_LOCK_MAX);
+	lock_release_explicit(s, SHARED_LOCK_EXCL_BIT, memory_order_relaxed);
 }
 // Try to acquire the "exclusive" part of a shared lock. This will return false if any thread is trying to or has already obtained an exclusive lock. See `exclusive_lock_acquire`
 templated bool exclusive_lock_try_acquire(shared_lock_t* s){
-	if(!lock_try_acquire(&s->x, 1)) return false;
-	if(!lock_try_acquire(&s->s, LOCK_MAX)){
-		lock_release_explicit(&s->x, 1, memory_order_relaxed);
-		return false;
-	}
-	return true;
+	return lock_try_acquire(s, LOCK_MAX);
 }
 // Release the "exclusive" part of a shared lock. Releasing when no exclusive part was acquired is UB
 templated void exclusive_lock_release(shared_lock_t* s){
-	assert(!lock_fetch(&s->x), "exclusive_lock_release() called on shared_lock_t with no exclusive part acquired");
-	lock_release(&s->s, LOCK_MAX);
-	lock_release(&s->x, 1);
+	assert(!lock_fetch(s), "exclusive_lock_release() called on shared_lock_t with no exclusive part acquired");
+	lock_release(s, LOCK_MAX);
 }
 // Downgrade from an "exclusive" lock to a shared lock, without releasing the shared part. Unlike `shared_lock_upgrade`, this does not have the same deadlock danger, and will therefore always succeed. Downgrading when no exclusive part was acquired is UB
 templated void exclusive_lock_downgrade(shared_lock_t* s){
-	assert(!lock_fetch(&s->x), "exclusive_lock_downgrade() called on shared_lock_t with no exclusive part acquired");
-	lock_release(&s->s, LOCK_MAX-1);
-	lock_release(&s->x, 1);
+	assert(!lock_fetch(s), "exclusive_lock_downgrade() called on shared_lock_t with no exclusive part acquired");
+	lock_release(s, LOCK_MAX-1);
+}
+
+/*// Incomplete hashmap implementation
+typedef union _hashmap_ptr{ union _hashmap_ptr* nextp; uintptr_t value; } _hashmap_ptr;
+#if SIZE_MAX >= UINT64_MAX
+typedef struct hashmap_t{
+	_hashmap_ptr* entries;
+	size_t b_exp:8, size:sizeof(size_t)*CHAR_BIT-8;
+} hashmap_t;
+static_assert(sizeof(hashmap_t) == sizeof(size_t) * 2);
+#else
+typedef struct hashmap_t{
+	_hashmap_ptr* entries;
+	size_t b_exp, size;
+} hashmap_t;
+static_assert(sizeof(hashmap_t) == sizeof(size_t) * 3);
+#endif
+typedef struct hash_iterator_t{
+	_hashmap_ptr *bucket_start, *last_bucket;
+	_hashmap_ptr *cur; size_t adv;
+} hash_iterator_t;
+static_assert(sizeof(hash_iterator_t) == sizeof(size_t) * 4);
+
+#define adv_aligned(p, a) (((p)+(a)-1)&~(a))
+
+typedef struct hashmap_descriptor_t{
+	size_t size, align;
+	uint64_t (*hash)(void*);
+	uint64_t (*hash_value)(void*);
+	bool (*compare)(void* key, void* candidate);
+	void (*move)(void* new_, void* old);
+} hashmap_descriptor_t;
+
+noinline void _hashmap_grow1(hashmap_t* map, hashmap_descriptor_t* desc){
+	unsigned bexp = map->b_exp++;
+	size_t new_prefix = (1<<bexp)+1;
+	size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*(new_prefix+(4<<bexp)), desc->align) + desc->size*(4<<bexp);
+	_hashmap_ptr* entries2 = (_hashmap_ptr*)(desc->align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc->align) : malloc(alloc_sz));
+	if(!entries2) abort();
+	memset(entries2, 0, sizeof(_hashmap_ptr)*((1<<bexp)+1));
+	size_t old_prefix = (1<<(bexp-1))+1;
+	char* old_heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(old_prefix+(4<<(bexp-1))), desc->align);
+	char* new_heap = (char*)entries2+adv_aligned(sizeof(_hashmap_ptr)+(new_prefix+(4<<bexp)), desc->align);
+	size_t newsz = 0;
+	// savenge move
+	for(size_t i = new_prefix-1; i; i--){
+		_hashmap_ptr ptr = map->entries[i];
+		while(ptr.value){
+			char* old = old_heap+(ptr.nextp-map->entries-old_prefix)*desc->size;
+			if(desc->move) desc->move(new_heap, old);
+			else memcpy(new_heap, old, desc->size);
+			uint64_t h = desc->hash_value(new_heap), h2 = (h>>(64-bexp))+1; h &= sizeof(uintptr_t)-1;
+			_hashmap_ptr next = {.value = entries2[h2].value+h};
+			entries2[new_prefix+newsz] = next;
+			entries2[h2].nextp = entries2+new_prefix+newsz;
+			new_heap += desc->size; newsz++;
+			ptr = *ptr.nextp;
+		}
+	}
+	free(map->entries);
+	map->size = newsz;
+	map->entries = entries2;
+}
+
+templated hash_iterator_t hashmap_find_iterator(const hashmap_t* map, hashmap_descriptor_t desc, void* key){
+	unsigned bexp = map->b_exp;
+	if(!bexp) return (hash_iterator_t){};
+	bexp--;
+	uint64_t h = desc.hash(key);
+	_hashmap_ptr* bucket = &map->entries[(bexp ? h>>(64-bexp) : 0)+1];
+	_hashmap_ptr ptr = *bucket;
+	_hashmap_ptr* optr = ptr.nextp;
+	h &= sizeof(uintptr_t)-1;
+	while(ptr.value){
+		ptr = *optr;
+		if((ptr.value&(sizeof(uintptr_t)-1)) == h){
+			// Maybe match!
+			size_t prefix = (1<<bexp)+1;
+			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
+			if(desc.compare(key, (void*)(heap + (optr-map->entries - prefix)*desc.size))){
+				return (hash_iterator_t){bucket, map->entries+prefix, optr, (4<<bexp)};
+			}
+		}
+		optr = ptr.nextp;
+	}
+	return (hash_iterator_t){};
+}
+
+templated bool hashmap_iterator_is_valid(const hash_iterator_t* it){ return (bool)it->cur.value; }
+
+templated void* hashmap_find(const hashmap_t* map, hashmap_descriptor_t desc, void* key){
+	unsigned bexp = map->b_exp;
+	if(!bexp) return 0;
+	bexp--;
+	uint64_t h = desc.hash(key);
+	_hashmap_ptr ptr = map->entries[(bexp ? h>>(64-bexp) : 0)+1];
+	_hashmap_ptr* optr = ptr.nextp;
+	h &= sizeof(uintptr_t)-1;
+	while(ptr.value){
+		ptr = *optr;
+		if((ptr.value&(sizeof(uintptr_t)-1)) == h){
+			// Maybe match!
+			size_t prefix = (1<<bexp)+1;
+			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
+			void* candidate = (void*)(heap + (optr-map->entries - prefix)*desc.size);
+			if(desc.compare(key, candidate)) return candidate;
+		}
+		optr = ptr.nextp;
+	}
+	return 0;
+}
+
+templated void* hashmap_insert(hashmap_t* map, hashmap_descriptor_t desc, void* key){
+	unsigned bexp = map->b_exp;
+	uint64_t h = desc.hash(key);
+	if(!bexp){
+		size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*6, desc.align) + desc.size*4;
+		map->entries = (_hashmap_ptr*)(desc.align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc.align) : malloc(alloc_sz));
+		map->b_exp = 1; map->size = 1;
+		memset(map->entries, 0, sizeof(_hashmap_ptr)*6);
+		map->entries[1].nextp = &map->entries[2];
+		map->entries[2].value = h&(sizeof(uintptr_t)-1);
+		return (char*)map->entries + adv_aligned(sizeof(_hashmap_ptr)*6, desc.align);
+	}
+	bexp--;
+	size_t prefix = (1<<bexp)+1;
+	size_t idx = map->entries[0].value;
+	if(idx){ // consume from free list
+		map->entries[0] = map->entries[idx];
+	}else{
+		if(map->size >= (4<<bexp))
+			_hashmap_grow1(map, &desc);
+		idx = map->size++ + prefix;
+	}
+	uint64_t h2 = (h>>(64-bexp))+1; h &= sizeof(uintptr_t)-1;
+	map->entries[idx].nextp = map->entries[h2].nextp+h;
+	map->entries[h2].nextp = map->entries+idx;
+	char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
+	return heap+(idx-prefix)*desc.size;
+}
+
+templated bool hashmap_find_or_insert(hashmap_t* map, hashmap_descriptor_t desc, void* key, void** out){
+	unsigned bexp = map->b_exp;
+	uint64_t h = desc.hash(key);
+	if(!bexp){
+		size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*6, desc.align) + desc.size*4;
+		map->entries = (_hashmap_ptr*)(desc.align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc.align) : malloc(alloc_sz));
+		map->b_exp = 1; map->size = 1;
+		memset(map->entries, 0, sizeof(_hashmap_ptr)*6);
+		map->entries[1].nextp = &map->entries[2];
+		map->entries[2].value = h&(sizeof(uintptr_t)-1);
+		*out = (char*)map->entries + adv_aligned(sizeof(_hashmap_ptr)*6, desc.align);
+		return true;
+	}
+	bexp--;
+	size_t prefix = (1<<bexp)+1;
+	uint64_t h2 = (h>>(64-bexp))+1; h &= 7;
+	_hashmap_ptr ptr = map->entries[h2];
+	_hashmap_ptr* optr = ptr.nextp;
+	while(optr){
+		ptr = *optr;
+		if((ptr.value&7) == h){
+			// Maybe match!
+			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
+			void* candidate = (void*)(heap + (optr-map->entries - prefix)*desc.size);
+			if(desc.compare(key, candidate)){ *out = candidate; return false; }
+		}
+		optr = ptr.nextp;
+	}
+	size_t idx = map->entries[0].value;
+	if(idx){ // consume from free list
+		map->entries[0] = map->entries[idx];
+	}else{
+		if(map->size >= (4<<bexp))
+			_hashmap_grow1(map, &desc);
+		idx = map->size++ + prefix;
+	}
+	map->entries[idx].nextp = map->entries[h2].nextp+h;
+	map->entries[h2].nextp = map->entries+idx;
+	char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
+	*out = heap+(idx-prefix)*desc.size;
+	return true;
+}
+
+templated bool hashmap_delete(hashmap_t* map, hashmap_descriptor_t desc, void* key){
+
+}
+
+
+templated void hashmap_destroy(hashmap_t* map, hashmap_descriptor_t _){
+	if(map->b_exp) free(map->entries);
+}*/
+
+#if SIZE_MAX >= UINT64_MAX
+typedef struct hash_table_t{ uintptr_t cap_exp:8, data:sizeof(uintptr_t)*CHAR_BIT-8; } hash_table_t;
+static_assert(sizeof(hash_table_t) == sizeof(size_t));
+#else
+typedef struct hash_table_t{ uintptr_t cap_exp, data; } hash_table_t;
+static_assert(sizeof(hash_table_t) == sizeof(size_t) * 2);
+#endif
+
+templated void* hash_table_find(const hash_table_t* t, uint64_t hash){
+	return t->cap_exp ? ((void**)t->data)[hash&(1<<(t->cap_exp)-1)] : t->data;
+}
+templated void hash_table_put(hash_table_t* t, uint64_t hash, void* v){
+	if(t->cap_exp) ((void**)t->data)[hash&(1<<(t->cap_exp)-1)] = v;
+	else t->data = (uintptr_t)v;
+}
+templated void hash_table_set_rank(hash_table_t* t, unsigned rank){
+	if(t->cap_exp) free((void*)t->data);
+	t->cap_exp = rank;
+	if(rank){
+		void* d = malloc(sizeof(void*)<<rank);
+		memset(d, 0, sizeof(void*)<<rank);
+		t->data = (uintptr_t)d;
+	}else t->data = 0;
 }
 
 static_assert(SIZE_MAX >= UINT32_MAX && SIZE_MAX <= UINT64_MAX);

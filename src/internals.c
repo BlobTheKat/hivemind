@@ -79,17 +79,22 @@ typedef unsigned __int128 uint128_t;
 
 struct _hv_remote_vq{
 	// Identical to start of struct _hv_remote
-	struct _hv_remote* next;
-	union{
-		remote_t remote;
-		struct{
-			ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
-			atomic(uint32_t) ref;
-		};
-	};
+	size_t next;
+	
+	ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
+	atomic(uint32_t) ref;
+	
 	atomic(uint64_t) vq_last_used;
 	struct _hv_remote** prevp;
 	vqueue_t q;
+};
+
+struct _hv_send_pipe{
+	void* next; // as is used by hash_table_t
+	uint32_t id[5];
+	uint32_t dependency_hi; uint64_t dependency_lo;
+	size_t queued; // bytes>>2, highest 2 bits encode QoS instead
+	struct _hv_send_packet *start, **end;
 };
 
 struct _hv_remote{
@@ -101,51 +106,36 @@ struct _hv_remote{
 	// Linked list structure for use in linked list hashmaps
 	struct _hv_remote* next;
 	// Used as key in hashmaps
-	union{
-		remote_t remote;
-		struct{
-			ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
-			x_socket_t handle;
-		};
-	};
+	ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
+	uint32_t recv_seq_hi; // see recv_seq_lo
 
-	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
+	// Derived local key for incoming packets (and to sign ACKs)
+	union{ uint32_t recv_key[8]; uint64_t recv_crcinit; };
 
-	// == 2nd-4th cache line: frequently written by recv logic ==
+	// == 2nd & 3rd cache line: frequently written by recv logic ==
 
 	// See send_last_used
 	alignas(CACHE_LINE) atomic uint64_t recv_last_used;
-	// See send_unlocked_ref
-	uint32_t recv_unlocked_ref;
-	uint32_t recv_seq_hi; uint64_t recv_seq_lo; // Protocol sequence numbers
-
+	uint64_t recv_seq_lo; // Protocol sequence numbers
 	// Ring buffer of out-of-order-packets
 	// cur_packet contains the currently-being-reconstructed packet, if any, and its length in cur_packet_left (if no packet is being reconstructed then cur_packet_left is undefined)
 	// recv_queue[0] contains the head of the currently-being-reconstructed (head = where data is appended). This replaces what would otherwise certainly be a null (since the next packet that hasn't yet been received). If no packet is being reconstructed, then this is null (or if there are no packets in the queue then the queue is completely empty)
 	ring_buffer_t recv_queue;
-
-	// ---
-
-	// Back pointer for `_hv_meta.servers` linked list
-	struct _hv_remote** prevp;
 	// Key derivation timestamp to thwart replay attacks. Forgotten after state cutoff (all key derivations older than that window are rejected regardless)
 	uint64_t key_derived_when;
-	// Derived local key for incoming packets (and to sign ACKs)
-	union{ uint32_t recv_key[8]; uint64_t recv_crcinit; };
-
 	// ACK coalescing stuff
 	// Linked list of all remotes with unsent acks
 	struct _hv_remote* unsent_ack_next;
+
+	// ---
+	
 	// ACK coalescing stuff
 	// ack_coal_i = current index in ack_coal_buf
 	// ack_coal_tim0 = _hv_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
 	uint64_t ack_coal_tim0:56, ack_coal_i:8;
-	// ---
-
 	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hv_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
 	uint32_t ack_coal_buf[15];
-
-	// 4 bytes left
+	uint32_t recv_unlocked_ref; // See send_unlocked_ref
 
 	// == 5-6th cache line: frequently written by send/drain logic ==
 
@@ -163,13 +153,19 @@ struct _hv_remote{
 	// (Potentially hole-y) Ring buffer of send packets.
 	// `[0, unsent_i)` => Sent but unacked. These are in the send_order linked list. Each element is a pointer to &prev->next. This allows us to remove the packet from the linked list easily without making it a doubly linked list.
 	// `[unsent_i, end)` => Unsent packets (direct pointers, they are not in the linked list yet)
-	ring_buffer_t send_queue; size_t unsent_i;
+	ring_buffer_t send_queue;
+	// Rolling window for tracking how many packets can be sent how fast
+	uint64_t send_window;
 	// ---
+	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
 	// Linked list of all sent packets, in the order that they were last sent (and therefore the same order that they should be resent if needed).
 	// `send_order_end` is not a pointer to the last packet but to the last packet's next field (or a pointer to `send_order_start` if the list is empty). `*send_order_end` should always be `NULL`
 	struct _hv_send_packet *send_order_start, **send_order_end;
-	// Rolling window for tracking how many packets can be sent how fast
-	uint64_t send_window;
+
+	hash_table_t pipes_with_unsent_b;
+	array_buffer_t pipes_with_unsent;
+	size_t packet_offset;
+	
 	// Packed tightly for memory efficiency
 	// `min_latency_when` -> When `min_latency` was achieved
 	// `last_ack` -> When the last ack was received
@@ -184,6 +180,8 @@ struct _hv_remote{
 	// Growth rate, used to inflate `us_per_byte` to try sending faster when we thing more bandwidth may be available
 	float min_latency, avg_latency, us_per_byte, growth;
 	struct hivemind_server_t* server;
+	// Back pointer for the bucket linked list
+	struct _hv_remote** prevp;
 };
 
 // We don't need it to be 384 exactly but we wanna know if it ever jumps up
@@ -317,6 +315,9 @@ static inline uint64_t _hv_time_lock_acq(atomic(uint64_t)* ptr){
 		thread_yield();
 	}
 }
+static inline uint64_t _hv_time_lock_try_acq(atomic(uint64_t)* ptr){
+	return atomic_exchange_explicit(ptr, 0, memory_order_acquire);
+}
 // Peek at the value of a time lock without acquiring it. See `_hv_time_lock_acq`
 static inline uint64_t _hv_time_lock_peek(atomic(uint64_t)* ptr){
 	uint64_t l;
@@ -374,10 +375,8 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	}
 	state->send_order_start = 0; state->send_order_end = &state->send_order_start;
 	state->send_window = 0;
-	ring_iterator_t q = ring_buffer_iterator(&state->send_queue, state->unsent_i, -1ull);
-	while(ring_iterator_next(&q, &p, sizeof(p), true))
-		free(p);
-	
 	ring_buffer_clear(&state->send_queue);
-	state->unsent_i = 0;
+
+	// TODO: free our hyper complex data structure
+
 }
