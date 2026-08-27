@@ -351,7 +351,7 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 		p_vq->bypass_type = 2 + vqueue_open(&p_vq->q, name, sizeof(name));
 		p_vq->prevp = onext;
 	}else{
-		p = (struct _hv_remote*) _hv_alloc_a(sizeof(struct _hv_remote), alignof(struct _hv_remote));
+		p = (struct _hv_remote*) _hv_alloc_a(_HV_REMOTE_SIZE, alignof(struct _hv_remote));
 		memset(p, 0, sizeof(*p));
 		p->server_mtu = le16toh(s->mtu_le)>>2;
 		p->bypass_type = _hv_addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
@@ -364,6 +364,9 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 		p->send_order_end = &p->send_order_start;
 		p->server = s;
 		p->prevp = onext;
+#if SIZEOF_X_HANDLE <= 4
+		p->handle = s->handle;
+#endif
 	}
 	*onext = p;
 	p->next = next;
@@ -441,10 +444,24 @@ struct _hv_send_pipe* _hv_add_to_send_pipe(struct _hv_remote* state, hivemind_pi
 		pipe_state->dependency_lo = 0xFFFFFFFF00000000;
 		pipe_state->dependency_hi = 0xFFFFFFFF;
 		pipe_state->queued = (size_t)le16toh(pipe->mtu_le) << (sizeof(size_t)*CHAR_BIT-2);
+		unsigned cur_rank = hash_table_rank(&state->pipes_with_unsent_b);
+		size_t sz = array_buffer_size(&state->pipes_with_unsent);
+		if(sz > sizeof(struct _hv_send_pipe)*2 << cur_rank){
+			// rehash
+			char* data = (char*) array_buffer_data(&state->pipes_with_unsent);
+			hash_table_set_rank(&state->pipes_with_unsent_b, ++cur_rank);
+			for(unsigned i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
+				struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data+i);
+				uint64_t hash2 = _hv_mix64((uint64_t)ps->id[1]<<32|ps->id[4])^_hv_mix64((uint64_t)ps->id[2]<<32|ps->id[3]);
+				ps->next = hash_table_find(&state->pipes_with_unsent, hash2);
+				hash_table_put(&state->pipes_with_unsent, hash2, i + sizeof(struct _hv_send_pipe));
+			}
+			pos0 = hash_table_find(&state->pipes_with_unsent_b, hash);
+		}
 		pipe_state->next = pos0;
 		hash_table_put(&state->pipes_with_unsent_b, hash, array_buffer_size(&state->pipes_with_unsent));
 	}else{
-		pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos - sizeof(struct _hv_send_pipe));
+		pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos) - 1;
 		if(memcmp(pipe->id, pipe_state->id, 20)){
 			pos = pipe_state->next;
 			goto check;

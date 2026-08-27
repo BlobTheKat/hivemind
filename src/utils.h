@@ -723,6 +723,7 @@ templated void hash_table_set_rank(hash_table_t* t, unsigned rank){
 		t->data = (uintptr_t)d;
 	}else t->data = 0;
 }
+templated unsigned hash_table_rank(hash_table_t* t){ return t->cap_exp; }
 
 static_assert(SIZE_MAX >= UINT32_MAX && SIZE_MAX <= UINT64_MAX);
 typedef uint64_t sfat_pointer_t;

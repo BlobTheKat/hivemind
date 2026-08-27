@@ -43,9 +43,9 @@ static inline void* _hv_alloc_a(size_t bytes, size_t to){
 // Used by hashmaps
 static inline uint64_t _hv_mix64(uint64_t x){
 	x ^= x >> 30;
-	x *= 0xbf58476d1ce4e5b9ULL;
+	x *= 0xbf58476d1ce4e5b9u;
 	x ^= x >> 27;
-	x *= 0x94d049bb133111ebULL;
+	x *= 0x94d049bb133111ebu;
 	x ^= x >> 31;
 	return x;
 }
@@ -79,7 +79,7 @@ typedef unsigned __int128 uint128_t;
 
 struct _hv_remote_vq{
 	// Identical to start of struct _hv_remote
-	size_t next;
+	uintptr_t next_;
 	
 	ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
 	atomic(uint32_t) ref;
@@ -107,38 +107,15 @@ struct _hv_remote{
 	struct _hv_remote* next;
 	// Used as key in hashmaps
 	ip_addr_t addr; uint16_t port, server_mtu:14, bypass_type:2;
-	uint32_t recv_seq_hi; // see recv_seq_lo
-
-	// Derived local key for incoming packets (and to sign ACKs)
-	union{ uint32_t recv_key[8]; uint64_t recv_crcinit; };
-
-	// == 2nd & 3rd cache line: frequently written by recv logic ==
-
-	// See send_last_used
-	alignas(CACHE_LINE) atomic uint64_t recv_last_used;
-	uint64_t recv_seq_lo; // Protocol sequence numbers
-	// Ring buffer of out-of-order-packets
-	// cur_packet contains the currently-being-reconstructed packet, if any, and its length in cur_packet_left (if no packet is being reconstructed then cur_packet_left is undefined)
-	// recv_queue[0] contains the head of the currently-being-reconstructed (head = where data is appended). This replaces what would otherwise certainly be a null (since the next packet that hasn't yet been received). If no packet is being reconstructed, then this is null (or if there are no packets in the queue then the queue is completely empty)
-	ring_buffer_t recv_queue;
-	// Key derivation timestamp to thwart replay attacks. Forgotten after state cutoff (all key derivations older than that window are rejected regardless)
-	uint64_t key_derived_when;
-	// ACK coalescing stuff
-	// Linked list of all remotes with unsent acks
-	struct _hv_remote* unsent_ack_next;
-
-	// ---
+#if SIZEOF_X_HANDLE <= 4
+	x_socket_t handle;
+#endif
+	struct hivemind_server_t* server;
+	// Back pointer for the bucket linked list
+	struct _hv_remote** prevp;
+	// 16B left
 	
-	// ACK coalescing stuff
-	// ack_coal_i = current index in ack_coal_buf
-	// ack_coal_tim0 = _hv_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
-	uint64_t ack_coal_tim0:56, ack_coal_i:8;
-	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hv_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
-	uint32_t ack_coal_buf[15];
-	uint32_t recv_unlocked_ref; // See send_unlocked_ref
-
-	// == 5-6th cache line: frequently written by send/drain logic ==
-
+	// == 2-4th cache line: frequently written by send/drain logic ==
 	// Timestamp when last packet was sent. Also used as a lock and init flag (1 = uninit, 0 = locked)
 	// See _hv_time_lock_acq/_hv_time_lock_rel
 	alignas(CACHE_LINE) atomic uint64_t send_last_used;
@@ -157,14 +134,17 @@ struct _hv_remote{
 	// Rolling window for tracking how many packets can be sent how fast
 	uint64_t send_window;
 	// ---
-	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
 	// Linked list of all sent packets, in the order that they were last sent (and therefore the same order that they should be resent if needed).
 	// `send_order_end` is not a pointer to the last packet but to the last packet's next field (or a pointer to `send_order_start` if the list is empty). `*send_order_end` should always be `NULL`
 	struct _hv_send_packet *send_order_start, **send_order_end;
 
+	size_t packet_offset, unsent_iter_i;
 	hash_table_t pipes_with_unsent_b;
 	array_buffer_t pipes_with_unsent;
-	size_t packet_offset;
+	// 8B left
+
+	// ---
+	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
 	
 	// Packed tightly for memory efficiency
 	// `min_latency_when` -> When `min_latency` was achieved
@@ -179,15 +159,43 @@ struct _hv_remote{
 	// Microseconds per byte (inverse bandwidth), adjusted for growth rate
 	// Growth rate, used to inflate `us_per_byte` to try sending faster when we thing more bandwidth may be available
 	float min_latency, avg_latency, us_per_byte, growth;
-	struct hivemind_server_t* server;
-	// Back pointer for the bucket linked list
-	struct _hv_remote** prevp;
+
+	// == 5th-7th cache line: frequently written by recv logic ==
+	// See send_last_used
+	alignas(CACHE_LINE) atomic uint64_t recv_last_used;
+	uint32_t recv_unlocked_ref; // See send_unlocked_ref
+	uint32_t recv_seq_hi; uint64_t recv_seq_lo; // Protocol sequence numbers
+	// Ring buffer of out-of-order-packets
+	// cur_packet contains the currently-being-reconstructed packet, if any, and its length in cur_packet_left (if no packet is being reconstructed then cur_packet_left is undefined)
+	// recv_queue[0] contains the head of the currently-being-reconstructed (head = where data is appended). This replaces what would otherwise certainly be a null (since the next packet that hasn't yet been received). If no packet is being reconstructed, then this is null (or if there are no packets in the queue then the queue is completely empty)
+	ring_buffer_t recv_queue;
+	// Key derivation timestamp to thwart replay attacks. Forgotten after state cutoff (all key derivations older than that window are rejected regardless)
+	uint64_t key_derived_when;
+	// ACK coalescing stuff
+	// Linked list of all remotes with unsent acks
+	struct _hv_remote* unsent_ack_next;
+	// ---
+	uint32_t ack_coal_buf[15];
+	// 4B left
+
+	// ---
+	// Derived local key for incoming packets (and to sign ACKs)
+	union{ uint32_t recv_key[8]; uint64_t recv_crcinit; };
+	// ACK coalescing stuff
+	// ack_coal_i = current index in ack_coal_buf
+	// ack_coal_tim0 = _hv_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
+	uint64_t ack_coal_tim0:56, ack_coal_i:8;
+	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hv_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
+	// 8B left
+
+	alignas(16) char unused_[16];
 };
+#define _HV_REMOTE_SIZE (sizeof(struct _hv_remote)-16)
 
 // We don't need it to be 384 exactly but we wanna know if it ever jumps up
 // In that case, either reshuffle fields to keep it same size or increase this assert to the new size
 // Struct alignment >= CACHE_LINE so even a single poorly placed field can bump the size dramatically
-static_assert(sizeof(struct _hv_remote) <= 384, "sizeof(_hv_remote) changed");
+static_assert(sizeof(struct _hv_remote) <= 448, "sizeof(_hv_remote) changed");
 
 struct _hv_pipe{
 	atomic uintptr_t next;
@@ -377,6 +385,18 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	state->send_window = 0;
 	ring_buffer_clear(&state->send_queue);
 
-	// TODO: free our hyper complex data structure
-
+	size_t sz = array_buffer_size(&state->pipes_with_unsent);
+	char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
+	for(size_t i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
+		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
+		struct _hv_send_packet* packet = ps->next;
+		while(packet){
+			struct _hv_send_packet* p2 = packet->next;
+			free(packet);
+			packet = p2;
+		}
+	}
+	array_buffer_destroy(&state->pipes_with_unsent);
+	memset(&state->pipes_with_unsent, 0, sizeof(state->pipes_with_unsent));
+	hash_table_set_rank(&state->pipes_with_unsent_b, 0);
 }

@@ -74,7 +74,12 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				size_t rsz = _hv_read64(p+52);
 				p += 64 + w*68;
 				for(; rsz; rsz--){
-					// TODO
+					unsigned sz = _hv_read32(p);
+					if((sz-1) < 0xFFFE){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
+						p += 8+sz;
+					}else if(sz > 0x3ffff){
+						p += 44+_hv_read48(p+10);
+					}else p += sz > 0x1ffff ? 8 : 4;
 				}
 			}
 			if(w){
@@ -98,7 +103,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			for(; rsz; rsz--){
 				unsigned sz = _hv_read32(p);
 				sfat_pointer_t p0;
-				if((sz-1) < 0xFFFE){
+				if((sz-1) < 0xFFFE){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
 					uint8_t* p2 = malloc(sz + (bypass?12:20)) + (bypass?12:20);
 					*(uint32_t*)(p2-4) = _hv_read32(p+4);
 					memcpy(p2, p+8, sz);

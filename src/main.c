@@ -254,7 +254,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		plen = (pad_len > (size_t)first_mtu) ? first_mtu : (unsigned)pad_len;
 		packet = (struct _hv_send_packet*) _hv_alloc(sizeof(struct _hv_send_packet) + 4 * (true_plen = header+plen));
 		packet->kex = 0;
-		packet->payload4[bypass?2:4] = htole32(seq_lo);
+		packet->payload4[bypass ? 2 : 4] = htole32(seq_lo);
 		packet->payload4[0] = htole32(seq_hi);
 		packet->payload4[1] = htole32(seq_lo>>32);
 		if(bypass){
@@ -263,14 +263,14 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 				packet->payload4[true_plen-2] = htole32(len>>16);
 				packet->payload4[true_plen-3] = htole32(pipe_last);
 			}else{
-				packet->payload4[true_plen-1] = htole32(len|((uint32_t)seq_lo - pipe_last)<<16);
+				packet->payload4[true_plen-1] = htole32(len | ((uint32_t)seq_lo - pipe_last)<<16);
 			}
 		}else if(long_encoding){
 			packet->payload4[true_plen-1] = htole32(0xFFFF0000 | len);
 			packet->payload4[true_plen-2] = htole32(len >> 16);
 			packet->payload4[true_plen-3] = htole32(pipe_last);
 		}else{
-			packet->payload4[true_plen-1] = htole32(len << 16|((uint32_t)seq_lo - pipe_last));
+			packet->payload4[true_plen-1] = htole32(len<<16 | ((uint32_t)seq_lo - pipe_last));
 		}
 		plen -= long_encoding ? 3 : 1;
 	}
@@ -279,7 +279,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	uint8_t* p = (uint8_t*)(packet->payload4 + header);
 	if(0) more: {
 		plen = (pad_len > (size_t)mtu) ? mtu : (unsigned)pad_len;
-		header = bypass?3:5;
+		header = bypass ? 3 : 5;
 		packet = (struct _hv_send_packet*) _hv_alloc(sizeof(struct _hv_send_packet) + 4*(true_plen = header + plen));
 		packet->first = packet->resent = packet->kex = 0;
 		p = (uint8_t*)(packet->payload4 + header);
@@ -311,6 +311,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	_hv_time_lock_acq(&state->send_last_used);
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _hv_send_packet*);
+	// TODO: special case to avoid deadlock when jumping greater than the reorder window
 	_hv_add_to_send_pipe(state, to, packets[0], &(*(ppackets-1))->next, dwords);
 	_hv_drain_writes(state, tim = _hv_internal_clock());
 	if(!state->undrained_next){
@@ -321,11 +322,11 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 	_hv_time_lock_rel(&state->send_last_used, tim);
 
-	if(num_packets>8) free(packets);
+	if(num_packets > 8) free(packets);
 }
 
 void hivemind_quit(hivemind_server_t* s, hivemind_generic_fn_t on_close, const char* to, hivemind_pipe_finish_fn_t pipe_finish){
-	size_t to_len = to ? strlen(to)+1 : 1;
+	size_t to_len = to ? strlen(to) + 1 : 1;
 	struct _hv_open_close_data* oc = malloc(sizeof(struct _hv_open_close_data) + to_len);
 	oc->cb = on_close;
 	oc->finish_cb = pipe_finish;

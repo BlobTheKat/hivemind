@@ -12,6 +12,7 @@
 #endif
 
 #include <limits.h>
+#include <stdlib.h>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -249,6 +250,8 @@ static void x_zerobytes(void* data, size_t len);
 
 #ifdef _WIN32
 #include <malloc.h>
+#include <libloaderapi.h>
+#define alloca _alloca
 
 static const unsigned X_FILE_READONLY = 1;
 static const unsigned X_FILE_SEQUENTIAL = 2;
@@ -421,6 +424,18 @@ static bool x_move(const char* old_name, const char* new_name){
 static void x_zerobytes(void* data, size_t len){
 	SecureZeroMemory(data, len);
 }
+// On windows, we can basically pretend volatile == atomic (this is why intrin.h has no InterlockedLoad)
+__declspec(selectany) BOOL (WINAPI* volatile ProcessPrng_)(PBYTE, SIZE_T) = 0;
+static void x_randombytes(void* data, size_t len){
+	BOOL (WINAPI* ProcessPrng_impl)(PBYTE, SIZE_T) = ProcessPrng_;
+	if(!ProcessPrng_impl){
+		void* sym = GetProcAddress(LoadLibraryA("bcryptprimitives.dll"), "ProcessPrng");
+		if(!sym) abort();
+		ProcessPrng_ = ProcessPrng_impl = (BOOL (WINAPI*)(PBYTE, SIZE_T))sym;
+		// No acq/rel needed to publish newly mapped pages, page faults are served consistently with program order
+	}
+	ProcessPrng_impl(data, len);
+}
 
 #else
 #define _FILE_OFFSET_BITS 64
@@ -432,8 +447,8 @@ static void x_zerobytes(void* data, size_t len){
 #include <sys/socket.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <stdlib.h>
 #include <ifaddrs.h>
+#include <alloca.h>
 
 static const unsigned X_FILE_READONLY = O_RDWR | O_CREAT; // (O_RDWR | O_CREAT) ^ X_FILE_READONLY == O_RDONLY
 static const unsigned X_FILE_SEQUENTIAL = O_CLOEXEC; // flag that doesn't need to be AND'd out when passing to open()
