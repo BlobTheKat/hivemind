@@ -171,7 +171,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		return;
 	}
 	const uint8_t* omsg = msg;
-	retry:
+	retry: {}
 	size_t pad_len = (len+3)>>2, num_packets = 1;
 	uint64_t seq_lo; uint32_t seq_hi;
 	unsigned ser_mtu = state->server_mtu<<2;
@@ -242,7 +242,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		packet->kex = 1;
 		state->send_seq_hi = state->send_seq_lo = 0;
 	}
-	pipe_last = _hv_find_pipe_last(state, to->id, (uint32_t)seq_lo, &plch);
+	pipe_last = _hv_find_pipe_last(state, to, (uint32_t)seq_lo, &plch);
 	assert(!plen || !pipe_last); // if(kex) assert(pipe_last == 0);
 	seq_lo = state->send_seq_lo; seq_hi = state->send_seq_hi;
 	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi = seq_hi+1;
@@ -330,7 +330,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _hv_send_packet*);
 	// TODO: special case to avoid deadlock when jumping greater than the reorder window
-	_hv_add_to_send_pipe(state, to, packets[0], &(*(ppackets-1))->next, dwords, &plch);
+	_hv_add_to_send_pipe(state, to->id, packets[0], &(*(ppackets-1))->next, dwords, &plch);
 	tim = _hv_drain_writes(state, tim = _hv_internal_clock(), bypass);
 	if(!state->undrained_next){
 		struct _hv_remote* n = atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed);

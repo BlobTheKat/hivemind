@@ -150,7 +150,6 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 	uint64_t cutoff = (uint64_t)(state->avg_latency*2.);
 	if(cutoff < _HV_SEND_TICK*2) cutoff = _HV_SEND_TICK*2;
 	cutoff = (now - cutoff) << 20;
-	size_t sz = ring_buffer_size(&state->send_queue);
 	struct _hv_send_packet** replace = 0;
 	if(packet) for(;;){
 		if((int64_t)((packet->time_lo<<20) - cutoff) >= 0){
@@ -224,121 +223,125 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 	}
 
 	// drain unsent
+	again: {}
 	size_t sz = array_buffer_size(&state->pipes_with_unsent);
-	if(sendable_now && sz){
+	if(!sz){
+		// Don't measure throughput for a gap where we're not even trying
+		state->rtt_gate_lo = 0;
+		state->rtt_gate_hi = 0;
+		goto end;
+	}
+	if(sendable_now){
 		uint32_t chacha_in[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
 		if(!bypass) memcpy(chacha_in+4, state->send_key, 32);
 		else chacha_in[4] = state->send_crcinit, chacha_in[5] = state->send_crcinit>>32;
-		do{
-			char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
-			size_t iter_i = state->unsent_iter_i;
-			struct _hv_send_pipe* pipe_state = (struct _hv_send_pipe*)(unsent_data+iter_i);
-			struct _hv_send_packet *packet = pipe_state->next;
-			if((uintptr_t)packet & 1)
-				goto next;
-			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo);
-			if(i > 0x7FFFFF00){
-				if((iter_i += sizeof(struct _hv_send_pipe)) == sz) iter_i = state->unsent_iter_i = 0;
-				// TODO
-				next:
-
-				continue;
+		char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
+		size_t iter_i = state->unsent_iter_i;
+		again2:
+		if(!iter_i) goto find;
+		struct _hv_send_pipe* pipe_state = (struct _hv_send_pipe*)(unsent_data+iter_i) - 1;
+		struct _hv_send_packet *packet = pipe_state->start;
+		if((uintptr_t)packet & 1)
+			goto find;
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo);
+		if(i > 0x7FFFFF00){
+			find: {}
+			size_t best = (size_t)(-1), best_i;
+			for(size_t i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
+				struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
+				if((uintptr_t)ps->start & 1) continue;
+				if(ps->start) continue;
+				if(ps->queued < best) best = ps->queued, best_i = i;
 			}
-			i *= sizeof(struct _hv_send_packet**);
-			if(!(pipe_state->next = packet->next)){
+			iter_i = state->unsent_iter_i = best_i + sizeof(struct _hv_send_pipe);
+			goto again2;
+		}
+		i *= sizeof(struct _hv_send_packet**);
+		if(!(pipe_state->start = packet->next)){
+			// remove
+			struct _hv_send_pipe* last = (struct _hv_send_pipe*)(unsent_data + sz);
+			unsigned cur_rank = hash_table_rank(&state->pipes_with_unsent_b);
+			bool rehash = sz <= ((sizeof(struct _hv_send_pipe)>>1) << cur_rank);
+			void* true_next = pipe_state->next;
+			if(pipe_state != last){
 				// remove
-				struct _hv_send_pipe* last = (struct _hv_send_pipe*)(unsent_data + sz);
-				unsigned cur_rank = hash_table_rank(&state->pipes_with_unsent_b);
-				bool rehash = sz <= ((sizeof(struct _hv_send_pipe)>>1) << cur_rank);
-				void* true_next = pipe_state->next;
-				if(pipe_state != last){
-					// remove
-					if(!rehash){
-						uint64_t hash2 = _hv_mix64((uint64_t)last->id[1]<<32|last->id[4])^_hv_mix64((uint64_t)last->id[2]<<32|last->id[3]);
-						size_t p = (size_t)hash_table_find(&state->pipes_with_unsent_b, hash2);
-						if(p == sz){
-							hash_table_put(&state->pipes_with_unsent_b, hash2, last->next);
-						}else while(p){
-							struct _hv_send_pipe* p2 = ((struct _hv_send_pipe*)(unsent_data + p)-1);
-							p = (size_t)p2->next;
-							if(p == sz){
-								p2->next = last->next;
-								break;
-							}
-						}
-					}
-					*pipe_state = *last;
-				}
-				array_buffer_pop_discard(&state->pipes_with_unsent, sizeof(struct _hv_send_pipe));
-				sz -= sizeof(struct _hv_send_pipe);
 				if(!rehash){
-					uint64_t hash = _hv_mix64((uint64_t)last->id[1]<<32|last->id[4])^_hv_mix64((uint64_t)last->id[2]<<32|last->id[3]);
-					size_t target = iter_i+sizeof(struct _hv_send_pipe);
-					size_t p = (size_t)hash_table_find(&state->pipes_with_unsent_b, hash);
-					if(p == target){
-						hash_table_put(&state->pipes_with_unsent_b, hash, true_next);
+					uint64_t hash2 = _hv_mix64((uint64_t)last->id[1]<<32|last->id[4])^_hv_mix64((uint64_t)last->id[2]<<32|last->id[3]);
+					size_t p = (size_t)hash_table_find(&state->pipes_with_unsent_b, hash2);
+					if(p == sz){
+						hash_table_put(&state->pipes_with_unsent_b, hash2, last->next);
 					}else while(p){
 						struct _hv_send_pipe* p2 = ((struct _hv_send_pipe*)(unsent_data + p)-1);
 						p = (size_t)p2->next;
-						if(p == target){
-							p2->next = true_next;
+						if(p == sz){
+							p2->next = last->next;
 							break;
 						}
 					}
-				}else{
-					hash_table_set_rank(&state->pipes_with_unsent_b, --cur_rank);
-					for(unsigned i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
-						struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
-						uint64_t hash2 = _hv_mix64((uint64_t)ps->id[1]<<32|ps->id[4])^_hv_mix64((uint64_t)ps->id[2]<<32|ps->id[3]);
-						ps->next = hash_table_find(&state->pipes_with_unsent_b, hash2);
-						hash_table_put(&state->pipes_with_unsent_b, hash2, i + sizeof(struct _hv_send_pipe));
+				}
+				*pipe_state = *last;
+			}
+			array_buffer_pop_discard(&state->pipes_with_unsent, sizeof(struct _hv_send_pipe));
+			sz -= sizeof(struct _hv_send_pipe);
+			if(!rehash){
+				uint64_t hash = _hv_mix64((uint64_t)last->id[1]<<32|last->id[4])^_hv_mix64((uint64_t)last->id[2]<<32|last->id[3]);
+				size_t p = (size_t)hash_table_find(&state->pipes_with_unsent_b, hash);
+				if(p == iter_i){
+					hash_table_put(&state->pipes_with_unsent_b, hash, true_next);
+				}else while(p){
+					struct _hv_send_pipe* p2 = ((struct _hv_send_pipe*)(unsent_data + p)-1);
+					p = (size_t)p2->next;
+					if(p == iter_i){
+						p2->next = true_next;
+						break;
 					}
 				}
-				if(iter_i == sz) iter_i = state->unsent_iter_i = 0;
-			}
-			if((uintptr_t)pipe_state->next & 1){
-				struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((uintptr_t)pipe_state->next-1);
-				p2->prevp = &pipe_state->next;
-			}
-			size_t sending = (packet->len4<<2)+48;
-			sendable_now = sending < sendable_now ? sendable_now-sending : 0;
-			state->send_window += (uint64_t)(sending*state->us_per_byte);
-			_hv_time_lock_rel(&state->send_last_used, now);
-
-			// This outside of critical section
-			if(bypass){
-				uint64_t crcinit = /*state->send_crcinit*/ chacha_in[4] | chacha_in[5]<<32, crc;
-				if(packet->kex){
-					crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+2);
-					packet->payload4[2] = htole32(crcinit); packet->payload4[3] = htole32(crcinit>>32);
-				}else{
-					crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+(packet->first?3:0));
+			}else{
+				hash_table_set_rank(&state->pipes_with_unsent_b, --cur_rank);
+				for(unsigned i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
+					struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
+					uint64_t hash2 = _hv_mix64((uint64_t)ps->id[1]<<32|ps->id[4])^_hv_mix64((uint64_t)ps->id[2]<<32|ps->id[3]);
+					ps->next = hash_table_find(&state->pipes_with_unsent_b, hash2);
+					hash_table_put(&state->pipes_with_unsent_b, hash2, (void*)(i + sizeof(struct _hv_send_pipe)));
 				}
-				packet->payload4[0] = htole32(crc); packet->payload4[1] = htole32(crc>>32);
-			}else _hv_encrypt_packet(chacha_in, packet);
-			_hv_send_packet(state, packet, now, bypass);
+			}
+			state->unsent_iter_i = 0;
+		}else if((uintptr_t)pipe_state->start & 1){
+			struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((uintptr_t)pipe_state->start-1);
+			p2->prevp = &pipe_state->start;
+		}
+		size_t sending = (packet->len4<<2)+48;
+		sendable_now = sending < sendable_now ? sendable_now-sending : 0;
+		state->send_window += (uint64_t)(sending*state->us_per_byte);
+		_hv_time_lock_rel(&state->send_last_used, now);
 
-			now = _hv_time_lock_acq(&state->send_last_used);
-			if(!state->prevp){ // server shutdown
-				free(packet);
-				goto end;
+		// This outside of critical section
+		if(bypass){
+			uint64_t crcinit = /*state->send_crcinit*/ chacha_in[4] | (uint64_t)chacha_in[5]<<32, crc;
+			if(packet->kex){
+				crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+2);
+				packet->payload4[2] = htole32(crcinit); packet->payload4[3] = htole32(crcinit>>32);
+			}else{
+				crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+(packet->first?3:0));
 			}
-			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
-			if(i >= ring_buffer_size(&state->send_queue)){
-				ring_buffer_push_memset(&state->send_queue, 0, i + sizeof(struct _hv_send_packet**) - ring_buffer_size(&state->send_queue), false);
-			}
-			ring_buffer_set(&state->send_queue, i, &state->send_order_end, sizeof(struct _hv_send_packet**), true);
-			*state->send_order_end = packet;
-			state->send_order_end = &packet->next;
-			//ring_buffer_push(&state->send_queue, &end, sizeof(end), true);
-			if(!state->send_order_start) state->send_order_start = packet;
-			if(!sz){
-				// Don't measure throughput for a gap where we're not even trying
-				state->rtt_gate_lo = 0;
-				state->rtt_gate_hi = 0;
-				break;
-			}
-		}while(sent < sendable_now);
+			packet->payload4[0] = htole32(crc); packet->payload4[1] = htole32(crc>>32);
+		}else _hv_encrypt_packet(chacha_in, packet);
+		_hv_send_packet(state, packet, now, bypass);
+
+		now = _hv_time_lock_acq(&state->send_last_used);
+		if(!state->prevp){ // server shutdown
+			free(packet);
+			goto end;
+		}
+		size_t i2 = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+		if(i2 >= ring_buffer_size(&state->send_queue)){
+			ring_buffer_push_memset(&state->send_queue, 0, i2 + sizeof(struct _hv_send_packet**) - ring_buffer_size(&state->send_queue), false);
+		}
+		ring_buffer_set(&state->send_queue, i2, &state->send_order_end, sizeof(struct _hv_send_packet**), true);
+		*state->send_order_end = packet;
+		state->send_order_end = &packet->next;
+		if(!state->send_order_start) state->send_order_start = packet;
+		goto again;
 	}
 	end:
 	state->send_unlocked_ref--;
@@ -555,7 +558,7 @@ static void _hv_unencrypt_packet(uint32_t chacha_in[16], uint32_t hi, size_t lo1
 		}
 		for(unsigned i = 8; i < 13; i++, j++) p->payload4[j] ^= d[i];
 	}
-	ChaCha20_block_xor(chacha_in, p->payload4+j, (plen-j)>>4);
+	ChaCha20_block_xor(chacha_in, (uint8_t*)(p->payload4+j), (plen-j)>>4);
 }
 
 static bool _hv_filter_send_queue(hivemind_server_t* s, struct _hv_remote* state, uint32_t pipe0[5], uint32_t pipe1[5], bool first, bool bypass){

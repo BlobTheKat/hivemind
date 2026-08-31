@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <math.h>
 #include "dbg.h"
+#include <a.h>
 
 #if defined(__has_c_attribute)
 #if __has_c_attribute(likely)
@@ -480,7 +481,7 @@ templated bool shared_lock_upgrade(shared_lock_t* s){
 // Try to upgrade a "shared" lock to an exclusive one. This operation is performed without ever releasing the shared part of the lock. If another thread owns or is trying to obtain the exclusive lock, there is a possibility of deadlocks, and the function will return false (it follows that this function cannot block on the exclusive lock, however it can block if other threads hold the shared part of the lock). In all cases, upgrading when no shared part was acquired to begin with is UB
 templated bool shared_lock_try_upgrade(shared_lock_t* s){
 	assert((lock_fetch(s)&SHARED_LOCK_MAX) < SHARED_LOCK_MAX, "shared_lock_upgrade() called on shared_lock_t with no shared part acquired");
-	return lock_try_acquire(&s, LOCK_MAX-1);
+	return lock_try_acquire(s, LOCK_MAX-1);
 }
 // Acquire the "exclusive" part of a shared lock. This will block if any thread is trying to or has already obtained an exclusive lock. This will also cause all future shared/exclusive lock acquires to block until the exclusive lock is released
 templated void exclusive_lock_acquire(shared_lock_t* s){
@@ -708,10 +709,10 @@ static_assert(sizeof(hash_table_t) == sizeof(size_t) * 2);
 #endif
 
 templated void* hash_table_find(const hash_table_t* t, uint64_t hash){
-	return t->cap_exp ? ((void**)t->data)[hash&(1<<(t->cap_exp)-1)] : t->data;
+	return t->cap_exp ? ((void**)t->data)[hash&((1<<t->cap_exp)-1)] : (void*)t->data;
 }
 templated void hash_table_put(hash_table_t* t, uint64_t hash, void* v){
-	if(t->cap_exp) ((void**)t->data)[hash&(1<<(t->cap_exp)-1)] = v;
+	if(t->cap_exp) ((void**)t->data)[hash&((1<<t->cap_exp)-1)] = v;
 	else t->data = (uintptr_t)v;
 }
 templated void hash_table_set_rank(hash_table_t* t, unsigned rank){

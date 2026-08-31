@@ -9,10 +9,11 @@ extern "C" {
 // See `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`
 static const size_t HIVEMIND_PIPE_STR_MAX_LEN = IP_STR_MAX_LEN + /* port, mtu */ 12 + /* time */ 18 + /* rand_b64 */ 19 + /*QOS*/ 1;
 
+typedef struct hivemind_server_t hivemind_server_t;
 #ifndef _HV_NO_STRUCT_DEFINITION
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
-typedef struct{ union{
+struct hivemind_server_t{ union{
 	_Alignas(16) char bytes_[256];
 	struct{
 		// IP address returned by the reflection test, which is used to determine the public IP when constructing pipes. Note that this may be an IPv4-mapped IPv6 address. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
@@ -51,7 +52,7 @@ typedef struct{ union{
 	};
 	// Combined IP address, port and MTU used when constructing pipes. This is a view over the exact same memory as the `addr`, `port_le` and `mtu_le` fields. The same write restrictions apply.
 	uint32_t dwords[5];
-}; } hivemind_server_t;
+}; };
 _Static_assert(sizeof(hivemind_server_t) == 256, "");
 #endif
 

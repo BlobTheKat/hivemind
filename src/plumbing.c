@@ -383,7 +383,7 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 
 static void _hv_encrypt_packet(uint32_t chacha[16], struct _hv_send_packet* p){
 	unsigned hdr = 5+(p->kex<<2);
-	uint8_t* pl = (uint8_t*)(p->payload4+hdr);
+	uint32_t* pl = p->payload4 + hdr;
 	chacha[12] = 0;
 	chacha[13] = le32toh(p->payload4[3]);
 	chacha[14] = le32toh(p->payload4[1]);
@@ -397,17 +397,17 @@ static void _hv_encrypt_packet(uint32_t chacha[16], struct _hv_send_packet* p){
 	ChaCha20_block(d);
 
 	if(p->first){
-		uint32_t* pipeid = (uint32_t*)pl;
+		uint32_t* pipeid = pl;
 		for(unsigned i = 0; i < 5; i++) pipeid[i] ^= d[8+i];
-		pl += 20;
+		pl += 5;
 	}
 	unsigned num_blocks = (p->len4-5)>>4;
-	ChaCha20_block_xor(chacha, pl, num_blocks);
+	ChaCha20_block_xor(chacha, (uint8_t*)pl, num_blocks);
 	pl += num_blocks<<6;
-	uint8_t* end = p->payload4+(p->len4<<2);
-	for(unsigned i = 15; pl < end;) *(uint32_t*)(end -= 4) ^= d[i];
+	uint32_t* end = p->payload4+p->len4;
+	for(unsigned i = 15; pl < end;) *--end ^= d[i];
 	
-	Poly1305(pl, (size_t)((p->len4-hdr)<<2), (uint8_t*)d, (uint8_t*)(p->payload4+hdr));
+	Poly1305((uint8_t*)pl, (size_t)((p->len4-hdr)<<2), (uint8_t*)d, (uint8_t*)(p->payload4+hdr));
 }
 
 static inline void _hv_keyless_packet_finish(hivemind_server_t* s, const remote_t* to, uint8_t* packet, unsigned payload_len, uint32_t opts){
@@ -433,13 +433,14 @@ static inline void _hv_crcinitless_packet_finish(hivemind_server_t* s, const rem
 	soft_assert(send_success);
 }
 
-struct _hv_send_pipe* _hv_add_to_send_pipe(struct _hv_remote* state, uint32_t id[5], struct _hv_send_packet* nfirst, struct _hv_send_packet** nlast, size_t dwords, struct _hv_send_packet_placeholder* plch){
+void _hv_add_to_send_pipe(struct _hv_remote* state, const uint32_t id[5], struct _hv_send_packet* nfirst, struct _hv_send_packet** nlast, size_t dwords, struct _hv_send_packet_placeholder* plch){
 	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
 	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
 	struct _hv_send_pipe* pipe_state;
 	check:
 	assert(pos);
-	pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos) - 1;
+	char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
+	pipe_state = (struct _hv_send_pipe*)(unsent_data + (size_t)pos) - 1;
 	if(memcmp(id, pipe_state->id, 20)){
 		pos = pipe_state->next;
 		goto check;
@@ -451,8 +452,15 @@ struct _hv_send_pipe* _hv_add_to_send_pipe(struct _hv_remote* state, uint32_t id
 		struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((uintptr_t)plch->next-1);
 		p2->prevp = nlast;
 	}
+	if(array_buffer_size(&state->pipes_with_unsent) > sizeof(struct _hv_send_pipe)){
+		if(state->unsent_iter_i == (size_t)pos){
+			state->unsent_iter_i = 0;
+		}else if(state->unsent_iter_i && ((struct _hv_send_pipe*)(unsent_data + state->unsent_iter_i) - 1)->queued > pipe_state->queued){
+			state->unsent_iter_i = (size_t)pos;
+		}
+	}else state->unsent_iter_i = sizeof(struct _hv_send_pipe);
 }
-uint32_t _hv_find_pipe_last(struct _hv_remote* state, hivemind_pipe_t* pipe, uint32_t self, struct _hv_send_packet_placeholder* plch){
+uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pipe, uint32_t self, struct _hv_send_packet_placeholder* plch){
 	uint64_t hash = _hv_mix64((uint64_t)pipe->id[1]<<32|pipe->id[4])^_hv_mix64((uint64_t)pipe->id[2]<<32|pipe->id[3]);
 	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
 	struct _hv_send_pipe* pipe_state;
@@ -474,13 +482,13 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, hivemind_pipe_t* pipe, uin
 			for(unsigned i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
 				struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data+i);
 				uint64_t hash2 = _hv_mix64((uint64_t)ps->id[1]<<32|ps->id[4])^_hv_mix64((uint64_t)ps->id[2]<<32|ps->id[3]);
-				ps->next = hash_table_find(&state->pipes_with_unsent, hash2);
-				hash_table_put(&state->pipes_with_unsent, hash2, i + sizeof(struct _hv_send_pipe));
+				ps->next = hash_table_find(&state->pipes_with_unsent_b, hash2);
+				hash_table_put(&state->pipes_with_unsent_b, hash2, (void*)(i + sizeof(struct _hv_send_pipe)));
 			}
 			pos0 = hash_table_find(&state->pipes_with_unsent_b, hash);
 		}
 		pipe_state->next = pos0;
-		hash_table_put(&state->pipes_with_unsent_b, hash, array_buffer_size(&state->pipes_with_unsent));
+		hash_table_put(&state->pipes_with_unsent_b, hash, (void*)array_buffer_size(&state->pipes_with_unsent));
 	}else{
 		pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos) - 1;
 		if(memcmp(pipe->id, pipe_state->id, 20)){

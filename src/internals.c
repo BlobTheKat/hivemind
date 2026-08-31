@@ -1,5 +1,6 @@
 #pragma once
 #include "a.h"
+#include <string.h>
 #define CHACHA20_POLY1305_IMPL
 #include "chacha20poly1305.h"
 #define CRC64_IMPL
@@ -375,9 +376,10 @@ static inline void _hv_remote_cleanup_recv(struct _hv_remote* state, bool bypass
 		unsigned sz = sfat_size(ptr);
 		void* ptr = sfat_get(ptr);
 		if(!sz || sz == 0xFFFF){ if(ptr) free(ptr); }
-		else if(sz < 0xFFFE) free((const uint8_t*)ptr - (bypass ? 12 : 20));
+		else if(sz < 0xFFFE) free((uint8_t*)ptr - (bypass ? 12 : 20));
 	}
-	ring_buffer_clear(&state->recv_queue);
+	ring_buffer_destroy(&state->recv_queue);
+	memset(&state->recv_queue, 0, sizeof(ring_buffer_t));
 }
 
 static void _hv_remote_cleanup_send(struct _hv_remote* state){
@@ -388,7 +390,8 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	}
 	state->send_order_start = 0; state->send_order_end = &state->send_order_start;
 	state->send_window = 0;
-	ring_buffer_clear(&state->send_queue);
+	ring_buffer_destroy(&state->send_queue);
+	memset(&state->send_queue, 0, sizeof(ring_buffer_t));
 
 	size_t sz = array_buffer_size(&state->pipes_with_unsent);
 	char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
