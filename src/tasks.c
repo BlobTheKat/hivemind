@@ -110,25 +110,16 @@ static void _hv_remove_unused(hivemind_server_t* s, uint64_t t){
 	exclusive_lock_release(&s->state_lock);
 }
 
-static size_t _hv_send_packet(struct _hv_remote* state, struct _hv_send_packet* packet, uint64_t now, bool bypass){
+static void _hv_send_packet(struct _hv_remote* state, struct _hv_send_packet* packet, uint64_t now, bool bypass){
 	//printf("send %zu i=%zu\n", _hv_lseqof(packet), i);
 	unsigned len = packet->len4<<2;
 	if(bypass && packet->first) len -= packet->kex ? 2 : 1;
-#if SIZEOF_X_HANDLE <= 4
-	x_socket_t h = state->handle;
-#else
-	x_socket_t h = state->server->handle;
-#endif
-	bool send_success = x_udp_send(h, (remote_t){state->addr, state->port, 0, 0}, (char*)packet->payload4, len);
+	bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet->payload4, len);
 	soft_assert(send_success);
 	packet->next = 0; packet->time_lo = now;
-	*state->send_order_end = packet;
-	state->send_order_end = &packet->next;
-	return len+48;
 }
 
-static void _hv_drain_writes(struct _hv_remote* state, uint64_t now){
-	bool bypass = state->bypass_type == 1;
+static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool bypass){
 	if unlikely((state->rtt_gate_lo&5)==4){
 		// network partition
 		uint32_t rtt_gate = (uint32_t)state->rtt_gate_lo|(uint32_t)state->rtt_gate_hi<<16;
@@ -143,63 +134,115 @@ static void _hv_drain_writes(struct _hv_remote* state, uint64_t now){
 			rtt_gate = 4 | gen<<3 | ((1u<<(gen>>1))-1)<<8;
 		}else rtt_gate -= 256;
 		state->rtt_gate_lo = rtt_gate; state->rtt_gate_hi = rtt_gate>>16;
-		return;
+		return now;
 	}
 	float left = now-state->send_window;
 	if(left > _HV_SEND_BURST){
 		left = _HV_SEND_BURST;
 		state->send_window = now-_HV_SEND_BURST;
 	}
-	if(left <= 0) return;
+	if(left <= 0) return now;
 	size_t sendable_now = /*floor*/ (size_t)(left / state->us_per_byte), sent = 0;
-	if(!sendable_now) return;
+	if(!sendable_now) return now;
 
 	// find unacked
-	struct _hv_send_packet **rpacket = &state->send_order_start, *packet = *rpacket;
+	struct _hv_send_packet *packet = state->send_order_start, *packet0 = packet, *fpacket;
 	uint64_t cutoff = (uint64_t)(state->avg_latency*2.);
 	if(cutoff < _HV_SEND_TICK*2) cutoff = _HV_SEND_TICK*2;
 	cutoff = (now - cutoff) << 20;
 	size_t sz = ring_buffer_size(&state->send_queue);
-	if(packet) do{
-		if((int64_t)((packet->time_lo<<20) - cutoff) >= 0) break;
+	struct _hv_send_packet** replace = 0;
+	if(packet) for(;;){
+		if((int64_t)((packet->time_lo<<20) - cutoff) >= 0){
+			if(packet == packet0) packet0 = 0;
+			state->send_order_start = packet;
+			break;
+		}
 		if(packet->resent++ == 15){
 			// 16 failed attempts, network partition? remote restarted? we don't know. Go into probe mode
 			state->rtt_gate_hi = 0; state->rtt_gate_lo = 4;
-			return;
+			return now;
 		}
-		// Resent lost packet
-		struct _hv_send_packet* next = packet->next;
-		if(!(*rpacket = next)){
-			state->send_order_end = rpacket;
-		}else{
-			size_t i2 = (_hv_lseqof(next, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
-			ring_buffer_set(&state->send_queue, i2, &rpacket, sizeof(rpacket), true);
-			packet->next = 0;
-		}
-		if(packet == state->send_order_start)
-			state->send_order_start = next;
-
+		sent += (packet->len4<<2)+48;
 		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
-		struct _hv_send_packet** end = state->send_order_end;
-		sent += _hv_send_packet(state, packet, now, bypass);
-		ring_buffer_set(&state->send_queue, i, &end, sizeof(end), true);
-		//if(DEBUG) check_send(state);
+		ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
 		packet = packet->next;
-	}while(packet && sent < sendable_now);
+		if(sent >= sendable_now) goto stop;
+		if(!packet){
+			state->send_order_end = &state->send_order_start;
+			stop:
+			state->send_order_start = packet;
+			break;
+		}
+	}
+	if(packet){
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+		replace = &state->send_order_start;
+		ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
+	}
+	state->send_unlocked_ref++;
+	fpacket = packet;
+	if((packet = packet0)){
+		state->send_window += (uint64_t)((double)sent*(double)state->us_per_byte);
+		sendable_now = sent > sendable_now ? 0 : sendable_now-sent; sent = 0;
+		_hv_time_lock_rel(&state->send_last_used, now);
+
+		// This outside of critical section
+		for(;;){
+			// Resent lost packet
+			struct _hv_send_packet* next = packet->next;
+			_hv_send_packet(state, packet, now, bypass);
+			if(next == fpacket){ packet->next = 0; break; }
+			packet = next;
+		}
+
+		now = _hv_time_lock_acq(&state->send_last_used);
+		packet = packet0;
+		if(!state->prevp){ // server shutdown
+			while(packet){
+				struct _hv_send_packet* next = packet->next;
+				free(packet); packet = packet->next;
+			}
+			goto end;
+		}
+		float left = now-state->send_window;
+		if(left > _HV_SEND_BURST){
+			left = _HV_SEND_BURST;
+			state->send_window = now-_HV_SEND_BURST;
+		}
+		sendable_now = /*floor*/ left >= 0 ? (size_t)(left / state->us_per_byte) : 0;
+
+		*state->send_order_end = packet0;
+		replace = state->send_order_end;
+		state->send_order_end = &packet->next;
+		while(packet){
+			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+			ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
+			replace = &packet->next;
+			packet = *replace;
+		}
+	}
+
 	// drain unsent
 	size_t sz = array_buffer_size(&state->pipes_with_unsent);
-	if(sent < sendable_now && sz){
+	if(sendable_now && sz){
 		uint32_t chacha_in[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
 		if(!bypass) memcpy(chacha_in+4, state->send_key, 32);
-
-		char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
-		size_t iter_i = state->unsent_iter_i;
+		else chacha_in[4] = state->send_crcinit, chacha_in[5] = state->send_crcinit>>32;
 		do{
+			char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
+			size_t iter_i = state->unsent_iter_i;
 			struct _hv_send_pipe* pipe_state = (struct _hv_send_pipe*)(unsent_data+iter_i);
 			struct _hv_send_packet *packet = pipe_state->next;
+			if((uintptr_t)packet & 1)
+				goto next;
 			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo);
 			if(i > 0x7FFFFF00){
+				if((iter_i += sizeof(struct _hv_send_pipe)) == sz) iter_i = state->unsent_iter_i = 0;
 				// TODO
+				next:
+
+				continue;
 			}
 			i *= sizeof(struct _hv_send_packet**);
 			if(!(pipe_state->next = packet->next)){
@@ -253,23 +296,40 @@ static void _hv_drain_writes(struct _hv_remote* state, uint64_t now){
 				}
 				if(iter_i == sz) iter_i = state->unsent_iter_i = 0;
 			}
-			
-			// TODO: do this outside of critical section
+			if((uintptr_t)pipe_state->next & 1){
+				struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((uintptr_t)pipe_state->next-1);
+				p2->prevp = &pipe_state->next;
+			}
+			size_t sending = (packet->len4<<2)+48;
+			sendable_now = sending < sendable_now ? sendable_now-sending : 0;
+			state->send_window += (uint64_t)(sending*state->us_per_byte);
+			_hv_time_lock_rel(&state->send_last_used, now);
+
+			// This outside of critical section
 			if(bypass){
-				uint64_t crcinit, crc;
+				uint64_t crcinit = /*state->send_crcinit*/ chacha_in[4] | chacha_in[5]<<32, crc;
 				if(packet->kex){
-					crcinit = state->send_crcinit = _hv_alloc_id_short(state->server);
 					crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+2);
 					packet->payload4[2] = htole32(crcinit); packet->payload4[3] = htole32(crcinit>>32);
 				}else{
-					crcinit = state->send_crcinit;
 					crc = crc64(crcinit, (uint8_t*)packet->payload4, (packet->len4<<2)+(packet->first?3:0));
 				}
 				packet->payload4[0] = htole32(crc); packet->payload4[1] = htole32(crc>>32);
 			}else _hv_encrypt_packet(chacha_in, packet);
-			
-			struct _hv_send_packet** end = state->send_order_end;
-			sent += _hv_send_packet(state, packet, now, bypass);
+			_hv_send_packet(state, packet, now, bypass);
+
+			now = _hv_time_lock_acq(&state->send_last_used);
+			if(!state->prevp){ // server shutdown
+				free(packet);
+				goto end;
+			}
+			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+			if(i >= ring_buffer_size(&state->send_queue)){
+				ring_buffer_push_memset(&state->send_queue, 0, i + sizeof(struct _hv_send_packet**) - ring_buffer_size(&state->send_queue), false);
+			}
+			ring_buffer_set(&state->send_queue, i, &state->send_order_end, sizeof(struct _hv_send_packet**), true);
+			*state->send_order_end = packet;
+			state->send_order_end = &packet->next;
 			//ring_buffer_push(&state->send_queue, &end, sizeof(end), true);
 			if(!state->send_order_start) state->send_order_start = packet;
 			if(!sz){
@@ -280,7 +340,9 @@ static void _hv_drain_writes(struct _hv_remote* state, uint64_t now){
 			}
 		}while(sent < sendable_now);
 	}
-	state->send_window += (uint64_t)((double)sent*(double)state->us_per_byte);
+	end:
+	state->send_unlocked_ref--;
+	return now;
 }
 
 static inline void _hv_update_throughput(struct _hv_remote* state, struct _hv_send_packet* p, float ithr, float a){
@@ -436,12 +498,7 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 			}
 			uint64_t crc = crc64(state->recv_crcinit, packet, 8+(i<<2));
 			*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
-		#if SIZEOF_X_HANDLE <= 4
-			x_socket_t h = state->handle;
-		#else
-			x_socket_t h = state->server->handle;
-		#endif
-			bool send_success = x_udp_send(h, (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 8+(i<<2));
+			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 8+(i<<2));
 			soft_assert(send_success);
 		}else{
 			uint32_t chacha[30] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
@@ -456,12 +513,7 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 			for(unsigned j = 1; j < i; j++)
 				pl[j] = htole32(state->ack_coal_buf[j-1]);
 			Poly1305(packet+20, (i<<2)-4, (uint8_t*)chacha, packet);
-		#if SIZEOF_X_HANDLE <= 4
-			x_socket_t h = state->handle;
-		#else
-			x_socket_t h = state->server->handle;
-		#endif
-			bool send_success = x_udp_send(h, (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 16+(i<<2)+bypass);
+			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 16+(i<<2)+bypass);
 			soft_assert(send_success);
 		}
 		state->ack_coal_i = 0;
@@ -1320,7 +1372,7 @@ static void* _hv_listen(void* _){
 							}
 						}
 					}else{
-						_hv_drain_writes(state, tim);
+						tim = _hv_drain_writes(state, tim, state->bypass_type&1);
 						prev = &state->undrained_next;
 					}
 					_hv_time_lock_rel(&state->send_last_used, tim);

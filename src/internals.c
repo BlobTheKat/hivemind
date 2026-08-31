@@ -55,12 +55,17 @@ static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
 }
 
 struct _hv_send_packet{
-	struct _hv_send_packet* next;
+	struct _hv_send_packet* next; // can be tagged
 	uint64_t len4:14, resent:4, first:1, kex:1, time_lo:44;
 #if SIZE_MAX == UINT64_MAX
 	uint32_t seq_m;
 #endif
 	uint32_t payload4[];
+};
+
+struct _hv_send_packet_placeholder{
+	struct _hv_send_packet* next; // can be tagged
+	struct _hv_send_packet** prevp; // not tagged
 };
 
 static inline size_t _hv_lseqof(struct _hv_send_packet* p, bool bypass){
@@ -94,7 +99,7 @@ struct _hv_send_pipe{
 	uint32_t id[5];
 	uint32_t dependency_hi; uint64_t dependency_lo;
 	size_t queued; // bytes>>2, highest 2 bits encode QoS instead
-	struct _hv_send_packet *start, **end;
+	struct _hv_send_packet *start, **end; // start can be tagged
 };
 
 struct _hv_remote{
@@ -131,7 +136,7 @@ struct _hv_remote{
 	// `[0, unsent_i)` => Sent but unacked. These are in the send_order linked list. Each element is a pointer to &prev->next. This allows us to remove the packet from the linked list easily without making it a doubly linked list.
 	// `[unsent_i, end)` => Unsent packets (direct pointers, they are not in the linked list yet)
 	ring_buffer_t send_queue;
-	// Rolling window for tracking how many packets can be sent how fast
+	// Rolling window for tracking how many packets can be sent how fast in us
 	uint64_t send_window;
 	// ---
 	// Linked list of all sent packets, in the order that they were last sent (and therefore the same order that they should be resent if needed).
@@ -391,9 +396,14 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
 		struct _hv_send_packet* packet = ps->next;
 		while(packet){
-			struct _hv_send_packet* p2 = packet->next;
-			free(packet);
-			packet = p2;
+			if((uintptr_t)packet & 1){
+				struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((char*)packet - 1);
+				packet = p2->next;
+			}else{
+				struct _hv_send_packet* p2 = packet->next;
+				free(packet);
+				packet = p2;
+			}
 		}
 	}
 	array_buffer_destroy(&state->pipes_with_unsent);

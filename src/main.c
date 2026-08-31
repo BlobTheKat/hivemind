@@ -170,6 +170,8 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		}
 		return;
 	}
+	const uint8_t* omsg = msg;
+	retry:
 	size_t pad_len = (len+3)>>2, num_packets = 1;
 	uint64_t seq_lo; uint32_t seq_hi;
 	unsigned ser_mtu = state->server_mtu<<2;
@@ -187,6 +189,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	assert(mtu && mtu < 65536);
 
 	if(pad_len > (size_t)mtu) num_packets += (pad_len-1ull) / mtu;
+	
 	retry_acq: {}
 	uint64_t l = _hv_time_lock_acq(&state->send_last_used);
 	if(state->send_unlocked_ref&0x80000000){
@@ -202,9 +205,15 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	struct _hv_send_packet* packet = 0;
 	// plen excludes the header which is kinda sus
 	unsigned plen = 0, true_plen = 0;
+	struct _hv_send_packet_placeholder plch;
 	uint32_t pipe_last;
 	if unlikely(l == 1 || (tim-l) > s->state_lifetime){
-		if unlikely(ring_buffer_size(&state->send_queue)) _hv_remote_cleanup_send(state);
+		if(!state->prevp){
+			state->send_unlocked_ref--;
+			_hv_time_lock_rel(&state->send_last_used, 1);
+			return;
+			// TODO remove placeholder packet
+		}
 		if(bypass){
 			header = 9;
 			num_packets += (num_packets*mtu-pad_len)<8;
@@ -213,7 +222,9 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 			uint64_t shash = _hv_mix64_addr(s->addr, le16toh(s->port_le)), dhash = _hv_mix64_addr(to->addr, le16toh(to->port_le));
 			packet->payload4[0] = htole32(shash); packet->payload4[1] = htole32(shash>>32);
 			packet->payload4[2] = htole32(dhash); packet->payload4[3] = htole32(dhash>>32);
-			// crcinit is decided deferred (when sent)
+			_hv_nalloc_id(s, state->send_key+3);
+			state->send_key[2] = 0;
+			state->send_crcinit = _hv_alloc_id_short(s);
 		}else{
 			unsigned first_mtu = mtu;
 			header = 14;
@@ -230,7 +241,9 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		plen -= 2;
 		packet->kex = 1;
 		state->send_seq_hi = state->send_seq_lo = 0;
-	}else pipe_last = _hv_find_pipe_last(state, to->id, (uint32_t)seq_lo);
+	}
+	pipe_last = _hv_find_pipe_last(state, to->id, (uint32_t)seq_lo, &plch);
+	assert(!plen || !pipe_last); // if(kex) assert(pipe_last == 0);
 	seq_lo = state->send_seq_lo; seq_hi = state->send_seq_hi;
 	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi = seq_hi+1;
 	state->packet_offset += num_packets;
@@ -307,19 +320,25 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	*ppackets++ = packet;
 	if(pad_len) goto more;
 	assert((size_t)(ppackets - packets) == num_packets);
-
 	_hv_time_lock_acq(&state->send_last_used);
+	if unlikely(!state->prevp){
+		for(size_t i = 0; i < num_packets; i++) free(packets[i]);
+		_hv_time_lock_rel(&state->send_last_used, tim = _hv_internal_clock());
+		len += (msg == omsg ? 0 /* avoid UB when msg==NULL */ : msg - omsg); msg = omsg;
+		goto retry;
+	}
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _hv_send_packet*);
 	// TODO: special case to avoid deadlock when jumping greater than the reorder window
-	_hv_add_to_send_pipe(state, to, packets[0], &(*(ppackets-1))->next, dwords);
-	_hv_drain_writes(state, tim = _hv_internal_clock());
+	_hv_add_to_send_pipe(state, to, packets[0], &(*(ppackets-1))->next, dwords, &plch);
+	tim = _hv_drain_writes(state, tim = _hv_internal_clock(), bypass);
 	if(!state->undrained_next){
 		struct _hv_remote* n = atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed);
 		retry_acq2: state->undrained_next = n;
 		if(!atomic_compare_exchange_weak_explicit(&_hv_meta.undrained, &n, state, memory_order_acq_rel, memory_order_relaxed)) goto retry_acq2;
 		x_event_queue_wake(&_hv_meta.queue, _HV_SEND_TICK);
 	}
+	
 	_hv_time_lock_rel(&state->send_last_used, tim);
 
 	if(num_packets > 8) free(packets);

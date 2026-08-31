@@ -345,8 +345,8 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 			if(!state->undrained_next && !state->unsent_ack_next){
 				free(state);
 			}else{
-				_hv_time_lock_rel(&state->send_last_used, sl);
-				_hv_time_lock_rel(&state->recv_last_used, rl);
+				_hv_time_lock_rel(&state->send_last_used, 1);
+				_hv_time_lock_rel(&state->recv_last_used, 1);
 			}
 			state = n;
 		}
