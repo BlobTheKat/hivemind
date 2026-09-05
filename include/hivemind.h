@@ -9,11 +9,11 @@ extern "C" {
 // See `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`
 static const size_t HIVEMIND_PIPE_STR_MAX_LEN = IP_STR_MAX_LEN + /* port, mtu */ 12 + /* time */ 18 + /* rand_b64 */ 19 + /*QOS*/ 1;
 
-typedef struct hivemind_server_t hivemind_server_t;
+typedef struct hivemind_server hivemind_server_t;
 #ifndef _HV_NO_STRUCT_DEFINITION
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
-struct hivemind_server_t{ union{
+struct hivemind_server{ union{
 	_Alignas(16) char bytes_[256];
 	struct{
 		// IP address returned by the reflection test, which is used to determine the public IP when constructing pipes. Note that this may be an IPv4-mapped IPv6 address. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
@@ -57,7 +57,7 @@ _Static_assert(sizeof(hivemind_server_t) == 256, "");
 #endif
 
 // 40-byte struct representing a pipe. This is an aggregate struct, you can pass it around, reconstruct it, etc. All fields are public and ABI-stable. The `id` field is a random 160-bit identifier that is used to distinguish pipes with the same address. Note that fields are all in little-endian format, this means the byte-for-byte representation is identical on all machine, allowing you to safely serialize and deserialize pipes with e.g `memcpy()`. If you want a nicer human-readable format, see `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`.
-typedef struct hivemind_pipe_t{ union{
+typedef struct hivemind_pipe{ union{
 	struct{
 		ip_addr_t addr;
 		union{ struct{ uint16_t port_le, mtu_le; }; uint32_t port_mtu_packed_le; };
@@ -69,12 +69,24 @@ typedef struct hivemind_pipe_t{ union{
 _Static_assert(_Alignof(hivemind_pipe_t) <= 4, "");
 _Static_assert(sizeof(hivemind_pipe_t) == 40, "");
 
+typedef enum hivemind_pipe_close_reason{
+	HIVEMIND_CLOSED_PIPE_INVALID = 1, // This specific pipe definitely no longer exists as declared by the recipient node.
+	HIVEMIND_CLOSED_CONTINUITY_RETAINED = 2, // The remote is definitely still up and hasn't lost any state other than maybe closing the specific pipe.
+	HIVEMIND_CLOSED_CONTINUITY_LOST = 4, // The remote is definitely up but has lost its state since the pipe was created and now. This is perhaps because it has restarted in that time period without a clean hivemind save-restore.
+	HIVEMIND_CLOSED_TIMEOUT = 8, // This close event was generated as the result of a timeout. If the pipe still exists, resending to this pipe forfeits all order/delivery guarantees relative to previous messages. The simplest way to handle this consistently is to treat the same pipe as if it was an unrelated pipe (even if their byte representations compare equal).
+
+	// Specific failure modes you will actually receive
+	HIVEMIND_CLOSED_MESSAGE_PIPE_REJECTED = 3, // PIPE_INVALID | CONTINUITY_RETAINED. The connection remains open but the remote node rejected the message as the pipe has been closed.
+	HIVEMIND_CLOSED_MESSAGE_PIPE_OUT_OF_BOUNDS = 5, // PIPE_INVALID | CONTINUITY_LOST. This is an old pipe from a previous epoch. Implementation detail: this can be discovered immediately if a connection was already open, or after a few RTTs if it was the opening message of a new connection, which then required a probe packet to discover the reason for failed connection. If this happens, all pipes out of bounds are closed at the same time.
+} hivemind_pipe_close_reason_t;
+
 typedef void (*hivemind_generic_fn_t)(void*);
-typedef void (*hivemind_on_msg_fn_t)(void*, const uint8_t*, size_t, void*);
+typedef void (*hivemind_on_pipe_msg_fn_t)(void*, const uint8_t*, size_t, void*);
+typedef void (*hivemind_on_pipe_close_fn_t)(void*, hivemind_pipe_close_reason_t);
 typedef void* (*hivemind_pipe_restore_fn_t)(void*, const uint8_t*, size_t);
 typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
 
-typedef enum hivemind_pipe_qos_t{
+typedef enum hivemind_pipe_qos{
 	HIVEMIND_QOS_REALTIME = 0,
 	HIVEMIND_QOS_FASTER = 1,
 	HIVEMIND_QOS_SLOWER = 2,
@@ -90,7 +102,7 @@ static const ip_addr_t HIVEMIND_WAN_V6 = {.bytes={32,1,72,96,72,96,0,0,0,0,0,0,8
 // Additional non-essential parameters can be configured after this function but before `hivemind_start()`. These include
 // `server.udata`: Userdata passed as the first argument to `on_msg` and `on_close`
 // `server.state_lifetime`: Connection state lifetime and maximum partition length, in microseconds
-void hivemind_init(hivemind_server_t* server, const uint8_t master_key[32], hivemind_on_msg_fn_t on_msg);
+void hivemind_init(hivemind_server_t* server, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_pipe_msg, hivemind_on_pipe_close_fn_t on_pipe_close);
 // Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
 // If you would like to supply your own address, port, MTU or any combination of those, you can write to the corresponding fields in the server struct after `hivemind_init()` and before `hivemind_start()`, and they will be used instead of the results from the reflection test. When all 3 are provided before `hivemind_start()`, the reflection test is skipped and the field is unused (in any other case, passing `{0}` may fail).
 // You may also optionally load the server state from a file (`char* filename`). This will restore all pipes and connections from a previous `hivemind_quit()` that saved the state to that same file. This feature is useful for essential services that should not be disconnected from your network due to e.g a periodic machine restart. If `filename` is not `NULL`, the `pipe_restore` function may be called any number of times with any pipe-associated data that was serialized on last quit. The data passed to the function invocation is a temporary buffer, you may write within its bounds. It is discarded once the server starts. The buffer is also guaranteed to be aligned to at least 4 bytes.

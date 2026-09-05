@@ -46,7 +46,7 @@ hivemind_server_t h_server;
 int main(){
 	uint8_t master_key[32];
 	load_master_key(&master_key, "./.master.key");
-	hivemind_init(&h_server, master_key, (hivemind_on_msg_fn_t) on_msg);
+	hivemind_init(&h_server, master_key, (hivemind_on_pipe_msg_fn_t) on_msg);
 
 	hivemind_start(&h_server, (remote_t){
 		.addr = {0} /* [::] aka anywhere */, .port = 3331,

@@ -1,4 +1,8 @@
 #include "internals.c"
+#define CHACHA20_POLY1305_IMPL
+#include "chacha20poly1305.h"
+#define CRC64_IMPL
+#include "crc64.h"
 
 struct _hv_tls_buf_being_built{
 	array_buffer_t buf;

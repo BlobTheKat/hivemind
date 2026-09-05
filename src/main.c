@@ -1,6 +1,6 @@
 #include "save.c"
 
-void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_msg_fn_t on_msg){
+void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg, hivemind_on_pipe_close_fn_t on_close){
 	memset(s, 0, sizeof(*s));
 	s->on_msg = on_msg;
 	s->udata = s;
@@ -30,8 +30,8 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 		if(!s->mtu_le) s->mtu_le = htole16(where.mtu);
 	}
 	s->mtu_le &= htole16(~3);
-	// 64MB total. Can queue 32MB every _HV_SEND_TICK which is 16GB/s or 128Gbps (realistically a bit less but this is still more than good enough)
-	if(!x_udp_opts(sock, 32768 * 1024, 32768 * 1024))
+	// 256MB total. Can queue 128MB every _HV_SEND_TICK which is 64GB/s or 512Gbps (realistically a bit less but this is still more than good enough)
+	if(!x_udp_opts(sock, 131072 * 1024, 131072 * 1024))
 		goto err;
 	
 	if(from){

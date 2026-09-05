@@ -64,7 +64,7 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 
 	// Initialize a server with the given master key, message callback, (optional) state lifetime in microseconds, and optionally load state from a file (not implemented yet)
 	void init(const uint8_t master_key[32], MsgFn on_msg){
-		hivemind_init(this, master_key, (hivemind_on_msg_fn_t)on_msg);
+		hivemind_init(this, master_key, (hivemind_on_pipe_msg_fn_t)on_msg);
 	}
 	
 	// If you would like to supply your own address, port, MTU or any combination of those to override the results from the reflection test, you can call `set_self()` before calling `start()`. If all three parameters are non-zero, the reflection test is skipped entirely.

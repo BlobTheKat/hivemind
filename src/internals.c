@@ -1,10 +1,6 @@
 #pragma once
 #include "a.h"
 #include <string.h>
-#define CHACHA20_POLY1305_IMPL
-#include "chacha20poly1305.h"
-#define CRC64_IMPL
-#include "crc64.h"
 #include "x.h"
 #include <time.h>
 #include <stdatomic.h>
@@ -13,7 +9,7 @@
 #define VQUEUE_IMPL
 #include <vqueue.h>
 #define _HV_NO_STRUCT_DEFINITION
-typedef struct hivemind_server_t hivemind_server_t;
+typedef struct hivemind_server hivemind_server_t;
 #include <hivemind.h>
 
 static_assert(CHAR_BIT == 8);
@@ -116,7 +112,7 @@ struct _hv_remote{
 #if SIZEOF_X_HANDLE <= 4
 	x_socket_t handle;
 #endif
-	struct hivemind_server_t* server;
+	struct hivemind_server* server;
 	// Back pointer for the bucket linked list
 	struct _hv_remote** prevp;
 	// 16B left
@@ -223,7 +219,7 @@ struct _hv_vq{
 	vqueue_t q;
 };
 
-struct hivemind_server_t{
+struct hivemind_server{
 	union{
 		struct{
 			ip_addr_t addr;

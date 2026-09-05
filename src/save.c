@@ -164,7 +164,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				}
 				p += 4+sz;
 				lo0++;
-				ring_buffer_push(&state->send_queue, &p2, sizeof(p2), true);
+				ring_buffer_push(&state->send_queue, &p2, sizeof(struct _hv_send_packet*), true);
 			}
 		}
 		shared_lock_release(&s->state_lock);
@@ -284,7 +284,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 							if(data){
 								buf2 = array_buffer_push_garbage(&b.buf, 44 + ((struct _hv_packet_reassembly*)data)->cur);
 								_hv_write32(buf2, 0x40000);
-								write_block:
+								write_block: {}
 								struct _hv_packet_reassembly* block = (struct _hv_packet_reassembly*)data;
 								_hv_write48(buf2+4, block->total);
 								_hv_write48(buf2+10, block->cur);
@@ -296,7 +296,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 						}else if(sz == 0xFFFE){
 							buf2 = array_buffer_push_garbage(&b.buf, 8);
 							_hv_write32(buf2, 0x20000);
-							_hv_write32(buf2+4, (uint32_t)data);
+							_hv_write32(buf2+4, (uint32_t)(uintptr_t)data);
 						}else if(sz == 0xFFFF){
 							if(data){
 								buf2 = array_buffer_push_garbage(&b.buf, 20 + ((struct _hv_packet_reassembly*)data)->cur);
@@ -321,7 +321,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					uint64_t lo0 = state->send_seq_lo; uint32_t hi = state->send_seq_hi;
 					uint64_t lo1 = lo0 - wsz/sizeof(struct _hv_send_packet*);
 					if(lo1>lo0) hi--;
-					while(ring_iterator_next(&it, &p, sizeof(p), true)){
+					while(ring_iterator_next(&it, &p, sizeof(struct _hv_send_packet*), true)){
 						if(!p){
 							array_buffer_push_memset(&b.buf, 0, 4);
 							continue;
@@ -333,7 +333,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 						uint8_t* p2 = array_buffer_push_garbage(&b.buf, sz+4);
 						_hv_write32(p2, sz | (uint32_t)(p->first<<16) | (uint32_t)(p->kex<<17)); // Upper 14 bits reserved
 						memcpy(p2+4, p->payload4+(bypass?2:4), sz);
-						i += sizeof(p);
+						i += sizeof(struct _hv_send_packet*);
 					}
 				}
 			}

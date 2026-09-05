@@ -201,7 +201,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		auto key = keyv.As<Napi::Uint8Array>();
 		if(key.ByteLength() < 32) goto key_err;
 
-		hivemind_init(&server_, key.Data(), (hivemind_on_msg_fn_t) HivemindServerJS::on_msg);
+		hivemind_init(&server_, key.Data(), (hivemind_on_pipe_msg_fn_t) HivemindServerJS::on_msg);
 
 		server_.udata = this;
 		auto partv = props.Get("maxPartition");
