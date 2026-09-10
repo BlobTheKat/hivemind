@@ -163,7 +163,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 			return now;
 		}
 		sent += (packet->len4<<2)+48;
-		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo) * sizeof(struct _hv_send_packet**);
 		ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
 		packet = packet->next;
 		if(sent >= sendable_now) goto stop;
@@ -175,7 +175,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		}
 	}
 	if(packet){
-		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo) * sizeof(struct _hv_send_packet**);
 		replace = &state->send_order_start;
 		ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
 	}
@@ -215,7 +215,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		replace = state->send_order_end;
 		state->send_order_end = &packet->next;
 		while(packet){
-			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+			size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo) * sizeof(struct _hv_send_packet**);
 			ring_buffer_set(&state->send_queue, i, &replace, sizeof(replace), true);
 			replace = &packet->next;
 			packet = *replace;
@@ -243,7 +243,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		struct _hv_send_packet *packet = pipe_state->start;
 		if((uintptr_t)packet & 1)
 			goto find;
-		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo);
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo);
 		if(i > 0x7FFFFF00){
 			find: {}
 			size_t best = (size_t)(-1), best_i;
@@ -333,7 +333,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 			free(packet);
 			goto end;
 		}
-		size_t i2 = (_hv_lseqof(packet, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+		size_t i2 = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo) * sizeof(struct _hv_send_packet**);
 		if(i2 >= ring_buffer_size(&state->send_queue)){
 			ring_buffer_push_memset(&state->send_queue, 0, i2 + sizeof(struct _hv_send_packet**) - ring_buffer_size(&state->send_queue), false);
 		}
@@ -382,11 +382,11 @@ static void _hv_ackd(struct _hv_remote* state, uint8_t* packet, unsigned plen, u
 		if(!(*spacket = next)){
 			state->send_order_end = spacket;
 		}else{
-			size_t i2 = (_hv_lseqof(next, bypass) + state->packet_offset-state->send_seq_lo) * sizeof(struct _hv_send_packet**);
+			size_t i2 = (_hv_lseqof(next, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo) * sizeof(struct _hv_send_packet**);
 			ring_buffer_set(&state->send_queue, i2, &spacket, sizeof(spacket), true);
 		}
 		if(state->send_order_start == p) state->send_order_start = next;
-		assert((lo&0xFFFFFFFFFFFF) == _hv_lseqof(p, bypass));
+		assert((uint32_t)lo == _hv_lseqof(p, bypass));
 
 		if(!p->resent){
 			// ADJUSTMENTS HERE
@@ -531,15 +531,9 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 
 static void _hv_unencrypt_packet(uint32_t chacha_in[16], uint32_t hi, size_t lo1, struct _hv_send_packet* p){
 	chacha_in[12] = -1;
-	size_t lseq = _hv_lseqof(p, false);
-	chacha_in[13] = (uint32_t)lseq;
-#if SIZE_MAX == UINT64_MAX
-	chacha_in[14] = (uint32_t)(lseq>>32);
-	chacha_in[15] = hi + (uint32_t)(lseq < lo1);
-#else
-	uint64_t hi1 = (uint64_t)hi<<32|(lo1>>32) + (uint32_t)(lseq < (size_t)lo1);
+	chacha_in[13] = _hv_lseqof(p, false);
+	uint64_t hi1 = (uint64_t)hi<<32|(lo1>>32) + (uint32_t)(chacha_in[13] < (size_t)lo1);
 	chacha_in[14] = (uint32_t)(hi1>>32); chacha_in[15] = (uint32_t)hi1;
-#endif
 	unsigned plen = p->len4;
 	unsigned j = 5;
 	if(p->first){
@@ -612,7 +606,6 @@ static bool _hv_filter_send_queue(hivemind_server_t* s, struct _hv_remote* state
 		ring_buffer_get(&old_queue, i, &p, sizeof(p), true);
 		assert(p); // By waiting for send_unlocked_ref to reach 0 there shouldn't be any blank spots in the unsent section anymore
 		unsigned p_payload_len = lenof(p)-header;
-		size_t lseq = _hv_lseqof(p, bypass);
 		if(!bypass && i < state->unsent_i){
 			_hv_unencrypt_packet(chacha_in, hi, lo1, p);
 		}

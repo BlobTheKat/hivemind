@@ -1,6 +1,6 @@
 #include "save.c"
 
-void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg, hivemind_on_pipe_close_fn_t on_close){
+void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg, hivemind_on_msg_fail_fn_t on_close){
 	memset(s, 0, sizeof(*s));
 	s->on_msg = on_msg;
 	s->udata = s;
@@ -42,7 +42,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 		bool success = false;
 		if(sz >= _HV_SAVE_HEADER_SZ){
 			uint8_t* data = (uint8_t*) malloc(sz);
-			if(x_read(f, 0, data, sz) == sz)
+			if(x_read(f, data, 0, sz) == sz)
 				success = _hv_load(s, data, sz, pipe_restore);
 			free(data);
 		}
@@ -133,7 +133,7 @@ void* hivemind_close_pipe(hivemind_server_t* s, const hivemind_pipe_t* pipe){
 	return _hv_kill_pipe(s, pipe->id);
 }
 
-void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_t* msg, size_t len){
+void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, void* ofud){
 #ifndef HIVEMIND_NO_LOCAL_BYPASS
 	if(!memcmp(s->dwords, to->dwords, 18 /* Everything except MTU */)){
 		// Zero-copy loopback shortcut
@@ -212,7 +212,6 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 			state->send_unlocked_ref--;
 			_hv_time_lock_rel(&state->send_last_used, 1);
 			return;
-			// TODO remove placeholder packet
 		}
 		if(bypass){
 			header = 9;
@@ -311,9 +310,6 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	pad_len -= plen;
 	packet->len4 = true_plen;
 	dwords += true_plen;
-#if SIZE_MAX == UINT64_MAX
-	packet->seq_m = seq_lo>>32;
-#endif
 	if(!++seq_lo) seq_hi++;
 	if(ppackets != packets)
 		(*(ppackets-1))->next = packet;
@@ -329,7 +325,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 	state->send_unlocked_ref--;
 	size_t i = ring_buffer_size(&state->send_queue) + (seq_lo - state->send_seq_lo - num_packets) * sizeof(struct _hv_send_packet*);
-	// TODO: special case to avoid deadlock when jumping greater than the reorder window
+	
 	_hv_add_to_send_pipe(state, to->id, packets[0], &(*(ppackets-1))->next, dwords, &plch);
 	tim = _hv_drain_writes(state, tim = _hv_internal_clock(), bypass);
 	if(!state->undrained_next){

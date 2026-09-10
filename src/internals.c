@@ -52,11 +52,9 @@ static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
 }
 
 struct _hv_send_packet{
-	struct _hv_send_packet* next; // can be tagged
+	struct _hv_send_packet* next; // can be tagged before its in send order ll
+	void* onfail_udata;
 	uint64_t len4:14, resent:4, first:1, kex:1, time_lo:44;
-#if SIZE_MAX == UINT64_MAX
-	uint32_t seq_m;
-#endif
 	uint32_t payload4[];
 };
 
@@ -65,13 +63,8 @@ struct _hv_send_packet_placeholder{
 	struct _hv_send_packet** prevp; // not tagged
 };
 
-static inline size_t _hv_lseqof(struct _hv_send_packet* p, bool bypass){
-	if(p->kex) return 0;
-	size_t seq = (size_t)le32toh(*(uint32_t*)(p->payload4+(bypass?2:4)));
-#if SIZE_MAX >= UINT64_MAX
-	seq |= (size_t)p->seq_m<<32;
-#endif
-	return seq;
+static inline uint32_t _hv_lseqof(struct _hv_send_packet* p, bool bypass){
+	return p->kex ? 0 : le32toh(*(uint32_t*)(p->payload4+(bypass?2:4)));
 }
 
 #ifdef __SIZEOF_INT128__
@@ -140,7 +133,8 @@ struct _hv_remote{
 	// `send_order_end` is not a pointer to the last packet but to the last packet's next field (or a pointer to `send_order_start` if the list is empty). `*send_order_end` should always be `NULL`
 	struct _hv_send_packet *send_order_start, **send_order_end;
 
-	size_t packet_offset, unsent_iter_i;
+	uint32_t packet_offset;
+	size_t unsent_iter_i;
 	hash_table_t pipes_with_unsent_b;
 	array_buffer_t pipes_with_unsent;
 	// 8B left
@@ -206,10 +200,10 @@ struct _hv_pipe{
 };
 
 struct _hv_open_close_data{
-	void (*cb)(void*);
+	hivemind_generic_fn_t cb;
 	union{
-		void* (*restore_cb)(void*, uint8_t*, size_t);
-		void (*finish_cb)(void*, void*);
+		hivemind_pipe_restore_fn_t restore_cb;
+		hivemind_pipe_finish_fn_t finish_cb;
 	};
 	char filename[];
 };
@@ -249,7 +243,7 @@ struct hivemind_server{
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
 	struct _hv_remote** remote_buckets;
-	void (*on_msg)(void*, const uint8_t*, size_t, void*);
+	hivemind_on_pipe_msg_fn_t on_msg;
 	atomic(size_t) pipes_heap_i, deleted_pipes;
 	atomic(uintptr_t)* pipes_data;
 	struct _hv_open_close_data* oc;

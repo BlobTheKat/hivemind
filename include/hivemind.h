@@ -14,7 +14,7 @@ typedef struct hivemind_server hivemind_server_t;
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
 struct hivemind_server{ union{
-	_Alignas(16) char bytes_[256];
+	_Alignas(16) const char bytes_[256];
 	struct{
 		// IP address returned by the reflection test, which is used to determine the public IP when constructing pipes. Note that this may be an IPv4-mapped IPv6 address. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_start()`.
 		ip_addr_t addr;
@@ -80,11 +80,11 @@ typedef enum hivemind_pipe_close_reason{
 	HIVEMIND_CLOSED_MESSAGE_PIPE_OUT_OF_BOUNDS = 5, // PIPE_INVALID | CONTINUITY_LOST. This is an old pipe from a previous epoch. Implementation detail: this can be discovered immediately if a connection was already open, or after a few RTTs if it was the opening message of a new connection, which then required a probe packet to discover the reason for failed connection. If this happens, all pipes out of bounds are closed at the same time.
 } hivemind_pipe_close_reason_t;
 
-typedef void (*hivemind_generic_fn_t)(void*);
-typedef void (*hivemind_on_pipe_msg_fn_t)(void*, const uint8_t*, size_t, void*);
-typedef void (*hivemind_on_pipe_close_fn_t)(void*, hivemind_pipe_close_reason_t);
-typedef void* (*hivemind_pipe_restore_fn_t)(void*, const uint8_t*, size_t);
-typedef void (*hivemind_pipe_finish_fn_t)(void*, void*);
+typedef void (*hivemind_generic_fn_t)(void* server);
+typedef void (*hivemind_on_pipe_msg_fn_t)(void* server, void* pipe_data, const uint8_t*, size_t);
+typedef void (*hivemind_on_msg_fail_fn_t)(void* server, void*, hivemind_pipe_close_reason_t);
+typedef void* (*hivemind_pipe_restore_fn_t)(void* server, const uint8_t*, size_t);
+typedef void (*hivemind_pipe_finish_fn_t)(void* server, void* pipe_data);
 
 typedef enum hivemind_pipe_qos{
 	HIVEMIND_QOS_REALTIME = 0,
@@ -102,7 +102,7 @@ static const ip_addr_t HIVEMIND_WAN_V6 = {.bytes={32,1,72,96,72,96,0,0,0,0,0,0,8
 // Additional non-essential parameters can be configured after this function but before `hivemind_start()`. These include
 // `server.udata`: Userdata passed as the first argument to `on_msg` and `on_close`
 // `server.state_lifetime`: Connection state lifetime and maximum partition length, in microseconds
-void hivemind_init(hivemind_server_t* server, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_pipe_msg, hivemind_on_pipe_close_fn_t on_pipe_close);
+void hivemind_init(hivemind_server_t* server, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_pipe_msg, hivemind_on_msg_fail_fn_t on_pipe_close);
 // Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
 // If you would like to supply your own address, port, MTU or any combination of those, you can write to the corresponding fields in the server struct after `hivemind_init()` and before `hivemind_start()`, and they will be used instead of the results from the reflection test. When all 3 are provided before `hivemind_start()`, the reflection test is skipped and the field is unused (in any other case, passing `{0}` may fail).
 // You may also optionally load the server state from a file (`char* filename`). This will restore all pipes and connections from a previous `hivemind_quit()` that saved the state to that same file. This feature is useful for essential services that should not be disconnected from your network due to e.g a periodic machine restart. If `filename` is not `NULL`, the `pipe_restore` function may be called any number of times with any pipe-associated data that was serialized on last quit. The data passed to the function invocation is a temporary buffer, you may write within its bounds. It is discarded once the server starts. The buffer is also guaranteed to be aligned to at least 4 bytes.
@@ -137,7 +137,7 @@ void hivemind_pipe_unlock();
 // Send a message to the given pipe. The message is guaranteed to be delivered as long as the pipe is not closed, and there is no network partition longer than the state cutoff, as defined by the receiver. Messages larger than the minimum MTU (minus overhead) will be fragmented (fragmentation primarily affects worst-case latency).
 // The message will be copied, `msg` does not need to remain valid after this function returns. This function also performs all of the necessary encryption itself. If the current thread is important (e.g UI thread) and the message is large, you should probably defer this call to another thread
 // BEWARE: If the destination pipe has the same address as the server, the message may be delivered synchronously and copy-less. It is therefore possible for the `on_msg` callback to be called before `hivemind_send()` returns. (Note that `hivemind_packet_detach()` / `hivemind_packet_free()` still work as expected even in this case). This behavior can be disabled by building hivemind with `-DHIVEMIND_NO_LOCAL_BYPASS`.
-void hivemind_send(hivemind_server_t* server, const hivemind_pipe_t* to, const uint8_t* msg, size_t len);
+void hivemind_send(hivemind_server_t* server, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, void* on_fail_udata);
 
 // Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
 void hivemind_create_pipe(hivemind_server_t* server, hivemind_pipe_t* pipe, void* udata, hivemind_pipe_qos_t qos);

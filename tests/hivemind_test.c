@@ -41,9 +41,9 @@ int main(){
 	x_file_t f = x_open(".master.key", 0);
 	if(x_getsize(f) < 32){
 		x_randombytes(MASTER_KEY, 32);
-		x_write(f, 0, MASTER_KEY, 32);
+		x_write(f, MASTER_KEY, 0, 32);
 	}else{
-		x_read(f, 0, MASTER_KEY, 32);
+		x_read(f, MASTER_KEY, 0, 32);
 	}
 	x_close(f);
 	hivemind_init(&ser, MASTER_KEY, (void(*)(void*, const uint8_t*, size_t, void*)) on_msg);

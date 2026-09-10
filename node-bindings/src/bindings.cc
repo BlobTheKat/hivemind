@@ -31,7 +31,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		PipeMeta* m;
 		uint8_t* data; size_t size;
 	};
-	static void on_msg(void* s_, const uint8_t* payload, size_t size, void* udata){
+	static void on_msg(void* s_, void* udata, const uint8_t* payload, size_t size){
 		HivemindServerJS* s = (HivemindServerJS*)s_;
 		PipeMeta* m = static_cast<PipeMeta*>(udata);
 		m->ref.fetch_add(1, std::memory_order::relaxed);
@@ -64,7 +64,10 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 				item.m->cb.Value().Call({v});
 				v.Detach();
 			}
-			if(item.m->ref.fetch_sub(1, std::memory_order::release) == 1) delete item.m;
+			if(item.m->ref.fetch_sub(1, std::memory_order::release) == 1){
+				atomic_thread_fence(std::memory_order::acquire);
+				delete item.m;
+			}
 			hivemind_packet_free(item.data);
 		}
 		next:
@@ -352,7 +355,10 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		memcpy(&pipe, pipev.Data(), sizeof(hivemind_pipe_t));
 		PipeMeta* m = (PipeMeta*) hivemind_close_pipe(&server_, &pipe);
 		m->cb.Unref();
-		if(m->ref.fetch_sub(1, std::memory_order::release) == 1) delete m;
+		if(m->ref.fetch_sub(1, std::memory_order::release) == 1){
+			atomic_thread_fence(std::memory_order::acquire);
+			delete m;
+		}
 		return info.Env().Undefined();
 	}
 

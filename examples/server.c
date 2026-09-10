@@ -5,16 +5,16 @@ void load_master_key(uint8_t key[32], const char* filename){
 	if(x_getsize(fd) < 32){
 		// Generate new key
 		x_randombytes(key, 32);
-		x_write(fd, 0, key, 32);
+		x_write(fd, key, 0, 32);
 	}else{
 		// Load existing key
-		x_read(fd, 0, key, 32);
+		x_read(fd, key, 0, 32);
 	}
 	x_close(fd);
 }
 
-void on_msg(hivemind_server_t* s, uint8_t* payload, size_t size, void* userdata){
-	printf("Got %zu bytes: %s", payload, size);
+void on_msg(hivemind_server_t* s, void* userdata, uint8_t* payload, size_t size){
+	printf("Got %zu bytes: %s", size, payload);
 }
 
 hivemind_server_t h_server;
@@ -34,5 +34,5 @@ int main(){
 
 	// Potentially on another machine/instance
 	const uint8_t data[] = "Hello, world!";
-	hivemind_send(&h_server, &pipe, data, sizeof(data));
+	hivemind_send(&h_server, &pipe, data, sizeof(data), NULL);
 }

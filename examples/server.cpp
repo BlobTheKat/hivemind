@@ -2,13 +2,14 @@
 #include <iostream>
 using namespace hivemind;
 
-void on_msg(HivemindServer<>* s, uint8_t* payload, size_t size, void* userdata){
+void on_msg(HivemindServer<>* s, void* userdata, const uint8_t* payload, size_t size){
 	std::cout << "Got " << size << " bytes: " << std::string((char*)payload, size) << std::endl;
 }
 
 
-HivemindServer<> h_server { master_key_from_file("./.master.key"), on_msg };
+HivemindServer<> h_server { master_key_from_file("./.master.key").data(), on_msg };
 int main(){
+	h_server.init(master_key_from_file("./.master.key").data(), on_msg);
 	h_server.start((remote_t){
 		.addr = {0} /* [::] aka anywhere */, .port = 3331,
 		.mtu = 0 /* unused */, .interface = 0 /* auto */,

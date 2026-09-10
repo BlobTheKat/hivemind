@@ -115,10 +115,10 @@ static bool x_move(const char* old_name, const char* new_name);
 static uint64_t x_getsize(x_file_t fd);
 
 // Read `count` bytes from fd, starting at offset `start`. Data is written to `buf`, which is expected to be valid, writable memory for at least `count` bytes. The number of bytes actually read is returned, which may be less than the number of bytes requested if the end of the file was found, or 0 if the file could not be read from
-static size_t x_read(x_file_t fd, uint64_t start, void* buf, size_t count);
+static size_t x_read(x_file_t fd, void* buf, uint64_t start, size_t count);
 
 // Write `count` bytes to fd, starting at offset `start`. Data is read from `buf`, which is expected to be valid, readable memory for at least `count` bytes. The number of bytes actually written is returned, which may be less than the number of bytes requested under special circumstances (old systems, disk full), or 0 if the file could not be written to
-static size_t x_write(x_file_t fd, uint64_t start, const void* buf, size_t count);
+static size_t x_write(x_file_t fd, const void* buf, uint64_t start, size_t count);
 
 // Set the size of a file in bytes. If the size is smaller than the current size, the file is truncated, otherwise it is expanded and the additional bytes are all set to 0
 static bool x_setsize(x_file_t fd, uint64_t sz);

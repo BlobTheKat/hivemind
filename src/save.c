@@ -157,9 +157,6 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 					p2->first = sz>>16; p2->kex = sz>>17; p2->resent = 0; p2->len4 = asz>>2;
 					if(p2->first && bypass)
 						p2->len4--;
-#if SIZE_MAX == UINT64_MAX
-					p2->seq_m = lo0>>32;
-#endif
 					memcpy(p2->payload4+(bypass?2:4), p+4, sz);
 				}
 				p += 4+sz;
@@ -363,7 +360,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 		x_file_t f = x_open(save, X_FILE_SEQUENTIAL);
 		if(f == X_FILE_INVALID) goto end;
 		if(x_setsize(f, 0))
-			x_write(f, 0, (uint8_t*)array_buffer_data(&b.buf), array_buffer_size(&b.buf));
+			x_write(f, (uint8_t*)array_buffer_data(&b.buf), 0, array_buffer_size(&b.buf));
 		x_close(f);
 	}
 	end:

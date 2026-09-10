@@ -7,7 +7,7 @@ static void check_send(struct _hv_remote* state){
 	size_t sz = ring_buffer_size(&state->send_queue);
 	if(!sz)
 		assert(state->send_order_end == &state->send_order_start);
-	size_t lo = state->send_seq_lo-state->packet_offset;
+	uint32_t lo = state->send_seq_lo-state->packet_offset;
 	bool f = !state->send_seq_lo&&!state->send_seq_hi;
 	for(size_t j = 0; j < sz; j += sizeof(struct _hv_send_packet**)){
 		struct _hv_send_packet** v2;
@@ -36,6 +36,7 @@ static array_buffer_t logs;
 }while(0);
 static void __uncork_logs(){
 	fwrite(array_buffer_data(&logs), array_buffer_size(&logs), 1, stdout);
-	array_buffer_clear(&logs);
+	array_buffer_destroy(&logs);
+	memset(&logs, 0, sizeof(logs));
 }
 static void (*uncork_logs)() = __uncork_logs;

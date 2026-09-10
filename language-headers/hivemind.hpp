@@ -2,8 +2,33 @@
 #include <string>
 #include <utility>
 #include <array>
-namespace hivemind{
+
+// helper
+class Self{
+	template<typename T, typename F>
+	struct Self__{ using type = T; };
+	template<typename F>
+	struct Self__<Self,F>{ using type = F; };
+	Self() = delete; Self(const Self&) = delete; Self(Self&&) = delete; ~Self() = delete;
+public:
+	template<typename T, typename F>
+	using resolve = typename Self__<T,F>::type;
+};
+
+
+namespace hivemind{ namespace{ // internal linkage
 #include "hivemind.h"
+
+enum class HivemindFailReason{
+	HIVEMIND_CLOSED_PIPE_INVALID = 1, // This specific pipe definitely no longer exists as declared by the recipient node.
+	HIVEMIND_CLOSED_CONTINUITY_RETAINED = 2, // The remote is definitely still up and hasn't lost any state other than maybe closing the specific pipe.
+	HIVEMIND_CLOSED_CONTINUITY_LOST = 4, // The remote is definitely up but has lost its state since the pipe was created and now. This is perhaps because it has restarted in that time period without a clean hivemind save-restore.
+	HIVEMIND_CLOSED_TIMEOUT = 8, // This close event was generated as the result of a timeout. If the pipe still exists, resending to this pipe forfeits all order/delivery guarantees relative to previous messages. The simplest way to handle this consistently is to treat the same pipe as if it was an unrelated pipe (even if their byte representations compare equal).
+
+	// Specific failure modes you will actually receive
+	HIVEMIND_CLOSED_MESSAGE_PIPE_REJECTED = 3, // PIPE_INVALID | CONTINUITY_RETAINED. The connection remains open but the remote node rejected the message as the pipe has been closed.
+	HIVEMIND_CLOSED_MESSAGE_PIPE_OUT_OF_BOUNDS = 5, // PIPE_INVALID | CONTINUITY_LOST. This is an old pipe from a previous epoch. Implementation detail: this can be discovered immediately if a connection was already open, or after a few RTTs if it was the opening message of a new connection, which then required a probe packet to discover the reason for failed connection. If this happens, all pipes out of bounds are closed at the same time.
+};
 
 // 40-byte struct representing a pipe. This is an aggregate struct, you can pass it around, reconstruct it, etc. All fields are public and ABI-stable. The `id` field is a random 160-bit identifier that is used to distinguish pipes with the same address. Note that fields are all in little-endian format, this means the byte-for-byte representation is identical on all machine, allowing you to safely serialize and deserialize pipes with e.g `memcpy()`. If you want a nicer human-readable format, see `hivemind_pipe_to_string()` and `hivemind_pipe_from_string()`.
 struct HivemindPipe: hivemind_pipe_t{
@@ -41,12 +66,13 @@ struct HivemindPipe: hivemind_pipe_t{
 
 // The main server struct. See note on `hivemind_init()`. This struct is somewhat large and includes some padding for ABI stability.
 // Only fields declared and documented in this header file are guaranteed to be ABI-stable. The remainder of the struct (including all "padding") is reserved for internal use and should not be touched for the entire active lifetime of the server (i.e from `hivemind_init()` until the `on_close()` callback passed to `hivemind_quit()` is called).
-template<typename T = HivemindServer<>, typename P = void> struct HivemindServer: private hivemind_server_t{
-
-	using MsgFn = void (*)(T*, const uint8_t*, size_t, P*);
+template<typename T_ = Self, typename P = void, typename F = void> struct HivemindServer: hivemind_server_t{
+	using T = Self::resolve<T_, HivemindServer<T_,P,F>>;
+	using MsgFn = void (*)(T*, P*, const uint8_t*, size_t);
 	using GenericFn = void (*)(T*);
 	using PipeRestoreFn = P* (*)(T*,uint8_t*,size_t);
 	using PipeFinishFn = void (*)(T*,P*);
+	using MessageFailFn = void (*)(T*,F*);
 
 	HivemindServer(const HivemindServer&) = delete;
 	HivemindServer& operator=(const HivemindServer&) = delete;
@@ -55,16 +81,11 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 	
 	HivemindServer() = default;
 	template<typename... Args>
-	HivemindServer(Args... a){ this->init(std::forward<Args>(a)...); }
-
-	T* udata(){ return hivemind_server_t::udata; }
-	void udata(T* u){ hivemind_server_t::udata = u; }
-	uint64_t state_lifetime(){ return hivemind_server_t::state_lifetime; }
-	void state_lifetime(uint64_t s){ hivemind_server_t::state_lifetime = s; }
+	HivemindServer(Args&&... a){ this->init(std::forward<Args>(a)...); }
 
 	// Initialize a server with the given master key, message callback, (optional) state lifetime in microseconds, and optionally load state from a file (not implemented yet)
-	void init(const uint8_t master_key[32], MsgFn on_msg){
-		hivemind_init(this, master_key, (hivemind_on_pipe_msg_fn_t)on_msg);
+	void init(const uint8_t master_key[32], MsgFn on_msg, MessageFailFn on_fail = 0){
+		hivemind_init(this, master_key, (hivemind_on_pipe_msg_fn_t)on_msg, (hivemind_on_msg_fail_fn_t)on_fail);
 	}
 	
 	// If you would like to supply your own address, port, MTU or any combination of those to override the results from the reflection test, you can call `set_self()` before calling `start()`. If all three parameters are non-zero, the reflection test is skipped entirely.
@@ -94,7 +115,7 @@ template<typename T = HivemindServer<>, typename P = void> struct HivemindServer
 		hivemind_send(this, to, (uint8_t*) data.data(), (const size_t&) data.size());
 	}
 	// Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
-	HivemindPipe create_pipe(P* udata = 0, HivemindPipe::QOS qos){
+	HivemindPipe create_pipe(P* udata = 0, HivemindPipe::QOS qos = HivemindPipe::QOS::FASTER){
 		hivemind_pipe_t pipe;
 		hivemind_create_pipe(this, &pipe, udata, (hivemind_pipe_qos_t)qos);
 		return (HivemindPipe) pipe;
@@ -111,12 +132,12 @@ static std::array<uint8_t, 32> master_key_from_file(const char* filename){
 	if(x_getsize(fd) < 32){
 		// Generate new key
 		x_randombytes(key.data(), 32);
-		x_write(fd, 0, key.data(), 32);
+		x_write(fd, key.data(), 0, 32);
 	}else{
 		// Load existing key
-		x_read(fd, 0, key.data(), 32);
+		x_read(fd, key.data(), 0, 32);
 	}
 	x_close(fd);
 	return key;
 }
-}
+} }
