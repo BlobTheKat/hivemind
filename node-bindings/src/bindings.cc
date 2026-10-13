@@ -211,9 +211,9 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		if(partv.IsNumber()){
 			double v = partv.As<Napi::Number>().DoubleValue()*1000.;
 			// sane minimum 5min
-			if(v < 0 || v >= (double)UINT64_MAX) server_.state_lifetime = UINT64_MAX;
-			else if(v < 300*SECOND_US) server_.state_lifetime = 300*SECOND_US;
-			else server_.state_lifetime = v;
+			if(v < 0 || v >= (double)UINT64_MAX) server_.message_timeout = UINT64_MAX;
+			else if(v < 300*SECOND_US) server_.message_timeout = 300*SECOND_US;
+			else server_.message_timeout = v;
 		}
 
 		auto addrv = props.Get("selfAddress");
@@ -394,11 +394,13 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			auto v = info[1].As<Napi::ArrayBuffer>();
 			data = v.Data(); sz = v.ByteLength();
 		}else goto type_err;
-		hivemind_pipe_t to;
-		memcpy(&to, tov.Data(), sizeof(to));
-		// Sanity check: V8 aligns ArrayBuffer contents to at least 4 (alignof(hivemind_pipe_t)) because Uint32Arrays exist and they won't be fast without that
-		hivemind_send(&server_, &to, (uint8_t*) data, sz);
-
+		hivemind_pipe_t to, *to_ptr = (hivemind_pipe_t*) tov.Data();
+		if((uintptr_t)to_ptr & 3){
+			// Unaligned, copy to stack
+			memcpy(&to, tov.Data(), sizeof(to));
+			to_ptr = &to;
+		}
+		hivemind_send(&server_, to_ptr, (uint8_t*) data, sz, NULL, NULL);
 		return env.Undefined();
 	}
 

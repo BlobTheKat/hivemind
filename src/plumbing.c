@@ -51,7 +51,7 @@ static bool _hv_fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint
 	}
 	if(p && lock_try_acquire(d->pipe_lock = &p->ref, 1)){
 		tls.packet_detach = d;
-		s->on_msg(s->udata, data, len, p->udata);
+		s->on_msg(s->udata, p->udata, data, len);
 		if(d->pipe_lock) lock_release(d->pipe_lock, 1);
 	}
 	shared_lock_release(&s->pipes_lock);
@@ -232,7 +232,7 @@ static void _hv_ram_packed_kex(hivemind_server_t* s, const uint32_t pipeid[stati
 
 static uint64_t _hv_ram_packed_kex_verify(hivemind_server_t* s, const remote_t* from, uint32_t out_key[static restrict 8], const uint32_t in_packet[static restrict 5]){
 	uint64_t t = epoch_now()/MILLISECOND_US, t1 = _hv_keyless_sig2(s, from, in_packet, out_key, 0, 0);
-	if((t>t1?t-t1:t1-t) > (s->state_lifetime+999)/MILLISECOND_US) return 0;
+	if((t>t1?t-t1:t1-t) > (s->message_timeout+999)/MILLISECOND_US) return 0;
 #ifndef HIVEMIND_NO_RECV_TSF
 #ifdef THREAD_SPECULATION_FENCE_AVAILABLE
 	thread_speculation_fence();
@@ -304,7 +304,7 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 	if(!buckets){
 		if(!(expect&_HV_FIND_CREATE)) fail: {
 			shared_lock_release(&s->state_lock);
-			return NULL;
+			return 0;
 		}
 		use_vq = _hv_addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->network_bypass_prefix_v4, s->network_bypass_prefix_v6);
 		if(use_vq && !(expect&_HV_FIND_INCLUDE_VQ)) goto fail;

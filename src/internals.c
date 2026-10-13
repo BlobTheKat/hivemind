@@ -53,7 +53,6 @@ static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
 
 struct _hv_send_packet{
 	struct _hv_send_packet* next; // can be tagged before its in send order ll
-	void* onfail_udata;
 	uint64_t len4:14, resent:4, first:1, kex:1, time_lo:44;
 	uint32_t payload4[];
 };
@@ -138,6 +137,7 @@ struct _hv_remote{
 	hash_table_t pipes_with_unsent_b;
 	array_buffer_t pipes_with_unsent;
 	// 8B left
+	
 
 	// ---
 	union{ uint32_t send_key[8]; uint64_t send_crcinit; }; // Derived local key for outgoing
@@ -224,7 +224,7 @@ struct hivemind_server{
 	uint8_t encryption_bypass_prefix_v6, encryption_bypass_prefix_v4;
 	uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 	void* udata;
-	uint64_t state_lifetime;
+	uint64_t message_timeout;
 	uint32_t master_key[8];
 #ifdef __SIZEOF_INT128__
 	union{

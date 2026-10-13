@@ -224,7 +224,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 	size_t buckets = (1<<s->buckets_exp)>>1;
 	struct _hv_remote** r = s->remote_buckets;
 	if(buckets < 2) r = (struct _hv_remote**) &s->remote_buckets;
-	uint64_t t = _hv_internal_clock(), life = s->state_lifetime;
+	uint64_t t = _hv_internal_clock(), life = s->message_timeout;
 	for(size_t i = 0; i < buckets; i++){
 		struct _hv_remote* state = r[i];
 		while(state){
@@ -243,7 +243,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 			state->ack_coal_i = 0;
 			bool bypass = state->bypass_type == 1;
 			if(save){
-				// Save: { Send, Recv } { Buffer, Seq, Last used } + Read KDW + Write RQR state
+				// Save: { Send, Recv } { Buffer, Seq, Last used } + Read KDW + Write RQLR state
 				bool r = rl!=1&&(t>life+life?rl>=t-life-life:true), w = sl!=1&&(t>life?sl>=t-life:true);
 				uint8_t* head = array_buffer_push_garbage(&b.buf, r*64+w*68+20);
 				memcpy(head, state->addr.bytes, 16);

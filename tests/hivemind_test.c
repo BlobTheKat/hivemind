@@ -6,7 +6,7 @@ hivemind_server_t ser;
 atomic uint32_t cnt = 0;
 double t0;
 uint8_t data[10000000];
-void on_msg(hivemind_server_t* s, const uint8_t* data2, size_t len, void* udata){
+void on_msg(hivemind_server_t* s, void* udata, const uint8_t* data2, size_t len){
 	printf("Got %zu bytes in %.2fms\n", len, ((double)mono_now()-t0)/1000.);
 	int cmp = len == sizeof(data) ? memcmp(data, data2, len) : 1;
 	if(cmp){
@@ -46,7 +46,7 @@ int main(){
 		x_read(f, MASTER_KEY, 0, 32);
 	}
 	x_close(f);
-	hivemind_init(&ser, MASTER_KEY, (void(*)(void*, const uint8_t*, size_t, void*)) on_msg);
+	hivemind_init(&ser, MASTER_KEY, (void(*)(void*, void*, const uint8_t*, size_t)) on_msg);
 	if(!hivemind_start(&ser, (remote_t){{0}, PORT, 0, 0}, ip_from_string("127.0.0.1"), NULL, NULL)){
 		printf("\x1b[31mFailed to bind to :%d\x1b[m\n", PORT);
 		return 1;
@@ -64,7 +64,7 @@ int main(){
 	t0 = (double) mono_now();
 	cnt = 100;
 	for(unsigned i = 0; i < 100; i++){
-		hivemind_send(&ser, &recpt, data, sizeof(data));
+		hivemind_send(&ser, &recpt, data, sizeof(data), NULL, NULL);
 	}
 
 	atomic_wait_until(&cnt, !cnt);

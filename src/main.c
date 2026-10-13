@@ -1,10 +1,10 @@
 #include "save.c"
 
-void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg, hivemind_on_msg_fail_fn_t on_close){
+void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg){
 	memset(s, 0, sizeof(*s));
 	s->on_msg = on_msg;
 	s->udata = s;
-	s->state_lifetime = 21600000000;
+	s->message_timeout = 21600000000;
 	s->encryption_bypass_prefix_v4 = 32; s->encryption_bypass_prefix_v6 = 128;
 	s->network_bypass_prefix_v4 = 255; s->network_bypass_prefix_v6 = 255;
 	shared_lock_init(&s->state_lock);
@@ -129,11 +129,11 @@ void hivemind_create_pipe(hivemind_server_t* s, hivemind_pipe_t* pipe, void* uda
 	_hv_append_pipe(s, pipe->id, udata);
 }
 void* hivemind_close_pipe(hivemind_server_t* s, const hivemind_pipe_t* pipe){
-	if(memcmp(pipe->dwords, &s->dwords, 20)) return 0;
+	//if(memcmp(pipe->dwords, &s->dwords, 20)) return 0;
 	return _hv_kill_pipe(s, pipe->id);
 }
 
-void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, void* ofud){
+void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, const hivemind_pipe_t* f_return_pipe, const void* errudata){
 #ifndef HIVEMIND_NO_LOCAL_BYPASS
 	if(!memcmp(s->dwords, to->dwords, 18 /* Everything except MTU */)){
 		// Zero-copy loopback shortcut
@@ -149,7 +149,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 #else
 	if unlikely(len > 0x7FFFFFFFFFFF){
-		fputs("hivemind_send(): Message size exhausts protocol limit", stderr);
+		fputs("hivemind_send(): Message size exceeds protocol limit", stderr);
 		abort();
 	}
 #endif
@@ -207,7 +207,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	unsigned plen = 0, true_plen = 0;
 	struct _hv_send_packet_placeholder plch;
 	uint32_t pipe_last;
-	if unlikely(l == 1 || (tim-l) > s->state_lifetime){
+	if unlikely(l == 1 || (tim-l) > s->message_timeout){
 		if(!state->prevp){
 			state->send_unlocked_ref--;
 			_hv_time_lock_rel(&state->send_last_used, 1);

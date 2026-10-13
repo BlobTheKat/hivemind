@@ -39,7 +39,7 @@ int asprintf(char** strp, const char* fmt, ...) {
 	// compute required length (excluding null terminator)
 	int len = _vscprintf(fmt, ap);
 	va_end(ap);
-	if(len < 0){ *strp = NULL; return -1; }
+	if(len < 0){ *strp = 0; return -1; }
 
 	char* buf = (char*) malloc(len + 1);
 	*strp = buf;

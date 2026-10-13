@@ -5,11 +5,11 @@
 #include <assert.h>
 
 #if defined(__clang__) || defined(__GNUC__)
-#  define deprecate(msg) __attribute__((deprecated(msg)))
+	#define deprecate(msg) __attribute__((deprecated(msg)))
 #elif defined(_MSC_VER)
-#  define deprecate(msg) __declspec(deprecated(msg))
+	#define deprecate(msg) __declspec(deprecated(msg))
 #else
-#  define deprecate(msg)
+	#define deprecate(msg)
 #endif
 
 #undef assert
@@ -17,25 +17,24 @@
 	// Reimplement assert bc it's funny
 	#if defined(__clang__) || defined(__GNUC__)
 		#define _dbg_assert(expr, msg, ...) (void)(__builtin_expect(!(expr), 0)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__builtin_trap(),0))
-		#define soft_assert(expr) (void)(__builtin_expect(!(expr),0)&&(__builtin_debugtrap(),0))
+		#define soft_assert(expr) (!__builtin_expect(!(expr),0)||(__builtin_debugtrap(),false))
 	#else
 		#include <intrin.h>
 		#define _dbg_assert(expr, msg, ...) (void)(!(expr)&&(fprintf(stderr, "\x1b[31;1m=== Assertion failed ===\x1b[m\n%s\n\x1b[m", msg),__fastfail(FAST_FAIL_FATAL_APP_EXIT),0))
-		#define soft_assert(expr) (void)(!(expr)&&(__debugbreak(),0))
+		#define soft_assert(expr) (!!(expr)||(__debugbreak(),false))
 	#endif
 	#define assert(...) _dbg_assert(__VA_ARGS__,#__VA_ARGS__)
 	#define DEBUG 1
 	#ifdef NO_SOFT_ASSERT
 		#undef soft_assert
-		#define soft_assert(...) (void)(0)
+		#define soft_assert(x) (!!(x))
 	#endif
 #else
-	#define soft_assert(...) (void)(0)
+	#define soft_assert(x) (!!(x))
 	#define assert(...) (void)(0)
 	#define DEBUG 0
 #endif
 
-#define sbr__(...) __VA_ARGS__
 #if defined(_WIN32)
 	#include <intrin.h>
 	#define breakpoint(...) (printf("\x1b[31;1m=== Breakpoint ===\x1b[m\n" __VA_OPT__("%s\n", (__VA_ARGS__))),__debugbreak())
@@ -89,10 +88,9 @@ deprecate("puts() with -DNO_STDIO") static int (*const puts_2)(const char*) = pu
 //deprecate("perror() with -DNO_STDIO") int perror(...);
 #endif
 
-#ifdef TSAN
-_Atomic uint32_t __tsan_sync;
-// thread sanitizer doesn't consider atomic_thread_fence to be a synchronization edge unfortunately
-#define tsan_fence(m) atomic_fetch_add_explicit(&__tsan_sync, 1, m)
+#ifdef __SANITIZE_THREAD__
+	_Atomic uint32_t __tsan_sync;
+	#define tsan_fence(m) atomic_fetch_add_explicit(&__tsan_sync, 1, m)
 #else
-#define tsan_fence(m) 0
+	#define tsan_fence(m) 0
 #endif
