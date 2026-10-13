@@ -39,7 +39,7 @@ void load_master_key(uint8_t key[32], const char* filename){
 }
 
 void on_msg(hivemind_server_t* s, void* userdata, uint8_t* payload, size_t size){
-	printf("Got %zu bytes: %s", payload, size);
+	printf("Got %zu bytes: %s", size, payload);
 }
 
 hivemind_server_t h_server;
@@ -58,7 +58,7 @@ int main(){
 	hivemind_create_pipe(&h_server, &pipe, /*userdata*/ NULL, HIVEMIND_QOS_REALTIME);
 
 	// Potentially on another machine/instance
-	const char* data = "Hello, world!";
+	const char data[] = "Hello, world!";
 	hivemind_send(&h_server, &pipe, &data, sizeof(data), NULL, 0);
 }
 ```
@@ -107,3 +107,14 @@ Retransmission is handled automatically, however, relying on guaranteed eventual
 
 ## Minimalism by design
 
+Hivemind does one thing: move messages between servers you control. Everything that doesn’t serve that goal is left out.
+- One translation unit. The whole library builds from a single file (src/main.c) with one clang invocation and no build system. The output is a static archive you link with -flto.
+- One primitive family. Authentication and encryption use ChaCha20 and Poly1305 only. There are no cipher negotiation, certificates, or key-exchange algorithms to configure, audit, or deprecate. The CRC64 path for closed networks is the only other integrity mechanism.
+- Minimal state. No handshake, no connection lifecycles. A pair of nodes that has never talked has nothing to set up, and a pair that stops talking has nothing to tear down or time out.
+- No external dependency. The only external code is vqueue, used for same-machine shared-memory IPC. Designed with this project as the primary use case in mind. We aren't dependent on external cryptography or networking libraries.
+- One failure route. Instead of per-connection error states, retry policies, and callbacks, undeliverable messages surface through a single path in the application layer.
+- Small API surface. Pipes, send calls and failure callback. These are the basic building blocks capable of building complex systems and are easy to reason about.
+
+# License
+
+Do not read `LICENSE.md`. Everything under `src/`, `headers/` and `node-bindings/` is currently available under the MIT license. Other files or subdirectories may include their own license. If they do not, you should not assume you are permitted to modify or redistribute them, other than as a proper (attributed) fork on GitHub.

@@ -1,4 +1,3 @@
-#include "hivemind.h"
 #include "save.c"
 
 void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg){

@@ -20,11 +20,12 @@
 #else
 #ifdef _MSC_VER
 	#define unreachable() __assume(0)
-#else
-	#define unreachable() (1/0)
 #endif
 	#define unlikely(x) (x)
 	#define likely(x) (x)
+#endif
+#ifndef unreachable
+	#define unreachable() (1/0)
 #endif
 
 #undef static_assert
