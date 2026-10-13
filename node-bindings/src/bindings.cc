@@ -400,7 +400,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			memcpy(&to, tov.Data(), sizeof(to));
 			to_ptr = &to;
 		}
-		hivemind_send(&server_, to_ptr, (uint8_t*) data, sz, NULL, NULL);
+		hivemind_send(&server_, to_ptr, (uint8_t*) data, sz, NULL, 0);
 		return env.Undefined();
 	}
 

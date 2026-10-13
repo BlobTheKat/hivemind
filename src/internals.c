@@ -36,6 +36,8 @@ static inline void* _hv_alloc_a(size_t bytes, size_t to){
 	}
 	return addr;
 }
+#define _HV_ALLOCATOR_SIZED 0
+static inline void _hv_free(void* addr, size_t bytes){ free(addr); }
 
 // Used by hashmaps
 static inline uint64_t _hv_mix64(uint64_t x){
@@ -52,10 +54,12 @@ static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
 }
 
 struct _hv_send_packet{
-	struct _hv_send_packet* next; // can be tagged before its in send order ll
-	uint64_t len4:14, resent:4, first:1, kex:1, time_lo:44;
+	struct _hv_send_packet* next; // can be tagged before its in send order linked list (but not after)
+	uint64_t len4:14, resent:4, first:1, kex:1, has_err_fb:1, time_lo:43;
 	uint32_t payload4[];
 };
+
+#define _hv_packet_allocsz(p) (sizeof(struct _hv_send_packet) + ((p)->len4<<2) + ((p)->has_err_fb?20+sizeof(uintptr_t):0))
 
 struct _hv_send_packet_placeholder{
 	struct _hv_send_packet* next; // can be tagged
@@ -205,6 +209,9 @@ struct _hv_open_close_data{
 		hivemind_pipe_restore_fn_t restore_cb;
 		hivemind_pipe_finish_fn_t finish_cb;
 	};
+#if _HV_ALLOCATOR_SIZED
+	unsigned filenamesz;
+#endif
 	char filename[];
 };
 
@@ -359,13 +366,20 @@ static inline void _hv_resolve_seq(uint64_t* lo, uint32_t* hi, uint32_t seq){
 	*hi += (lo2>>32)-(lo1>>32);
 }
 
+struct _hv_packet_reassembly{
+	size_t total; union{ size_t cur; uint32_t pipe_next; };
+	uint32_t pipe_last;
+	uint32_t pipe[5];
+	uint8_t data[];
+};
+
 static inline void _hv_remote_cleanup_recv(struct _hv_remote* state, bool bypass){
 	ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, SIZE_MAX);
 	sfat_pointer_t ptr;
 	while(ring_iterator_next(&it, &ptr, sizeof(ptr), true)){
 		unsigned sz = sfat_size(ptr);
 		void* ptr = sfat_get(ptr);
-		if(!sz || sz == 0xFFFF){ if(ptr) free(ptr); }
+		if(!sz || sz == 0xFFFF){ if(ptr) _hv_free(ptr, sizeof(struct _hv_packet_reassembly) + ((struct _hv_packet_reassembly*)ptr)->total); }
 		else if(sz < 0xFFFE) free((uint8_t*)ptr - (bypass ? 12 : 20));
 	}
 	ring_buffer_destroy(&state->recv_queue);
@@ -376,7 +390,7 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	struct _hv_send_packet* p = state->send_order_start;
 	while(p){
 		struct _hv_send_packet* p2 = p->next;
-		free(p); p = p2;
+		_hv_free(p, _hv_packet_allocsz(p)); p = p2;
 	}
 	state->send_order_start = 0; state->send_order_end = &state->send_order_start;
 	state->send_window = 0;
@@ -394,7 +408,7 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 				packet = p2->next;
 			}else{
 				struct _hv_send_packet* p2 = packet->next;
-				free(packet);
+				_hv_free(packet, _hv_packet_allocsz(packet));
 				packet = p2;
 			}
 		}

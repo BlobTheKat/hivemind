@@ -104,7 +104,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				unsigned sz = _hv_read32(p);
 				sfat_pointer_t p0;
 				if((sz-1) < 0xFFFE){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
-					uint8_t* p2 = malloc(sz + (bypass?12:20)) + (bypass?12:20);
+					uint8_t* p2 = _hv_alloc(sz + (bypass?12:20)) + (bypass?12:20);
 					*(uint32_t*)(p2-4) = _hv_read32(p+4);
 					memcpy(p2, p+8, sz);
 					p += 8+sz;
@@ -112,7 +112,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				}else if(sz > 0x3ffff){
 					// block
 					size_t cur = _hv_read48(p+10);
-					struct _hv_packet_reassembly* block = malloc(sizeof(struct _hv_packet_reassembly) + cur);
+					struct _hv_packet_reassembly* block = _hv_alloc(sizeof(struct _hv_packet_reassembly) + cur);
 					block->cur = cur;
 					block->total = _hv_read48(p+4);
 					block->pipe_last = _hv_read48(p+16);
@@ -153,7 +153,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				struct _hv_send_packet* p2 = 0;
 				if(sz){
 					bool asz = sz + (bypass?8:16);
-					p2 = malloc(sizeof(struct _hv_send_packet) + asz);
+					p2 = _hv_alloc(sizeof(struct _hv_send_packet) + asz);
 					p2->first = sz>>16; p2->kex = sz>>17; p2->resent = 0; p2->len4 = asz>>2;
 					if(p2->first && bypass)
 						p2->len4--;

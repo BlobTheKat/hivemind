@@ -34,5 +34,5 @@ int main(){
 
 	// Potentially on another machine/instance
 	const uint8_t data[] = "Hello, world!";
-	hivemind_send(&h_server, &pipe, data, sizeof(data), NULL, NULL);
+	hivemind_send(&h_server, &pipe, data, sizeof(data), NULL, 0);
 }

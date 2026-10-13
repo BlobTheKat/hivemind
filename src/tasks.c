@@ -150,10 +150,10 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 	struct _hv_send_packet *packet = state->send_order_start, *packet0 = packet, *fpacket;
 	uint64_t cutoff = (uint64_t)(state->min_latency + (state->avg_latency-state->min_latency)*4.);
 	if(cutoff < _HV_SEND_TICK*2) cutoff = _HV_SEND_TICK*2;
-	cutoff = (now - cutoff) << 20;
+	cutoff = (now - cutoff) << 21;
 	struct _hv_send_packet** replace = 0;
 	if(packet) for(;;){
-		if((int64_t)((packet->time_lo<<20) - cutoff) >= 0){
+		if((int64_t)((packet->time_lo<<21) - cutoff) >= 0){
 			if(packet == packet0) packet0 = 0;
 			state->send_order_start = packet;
 			break;
@@ -238,15 +238,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		else chacha_in[4] = state->send_crcinit, chacha_in[5] = state->send_crcinit>>32;
 		char* unsent_data = array_buffer_data(&state->pipes_with_unsent);
 		size_t iter_i = state->unsent_iter_i;
-		again2:
-		if(!iter_i) goto find;
-		struct _hv_send_pipe* pipe_state = (struct _hv_send_pipe*)(unsent_data+iter_i) - 1;
-		struct _hv_send_packet *packet = pipe_state->start;
-		if((uintptr_t)packet & 1)
-			goto find;
-		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo);
-		if(i > 0x7FFFFF00){
-			find: {}
+		while(!iter_i) find: {
 			size_t best = (size_t)(-1), best_i;
 			for(size_t i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
 				struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(unsent_data+i);
@@ -255,8 +247,12 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 				if(ps->queued < best) best = ps->queued, best_i = i;
 			}
 			iter_i = state->unsent_iter_i = best_i + sizeof(struct _hv_send_pipe);
-			goto again2;
 		}
+		struct _hv_send_pipe* pipe_state = (struct _hv_send_pipe*)(unsent_data+iter_i) - 1;
+		struct _hv_send_packet *packet = pipe_state->start;
+		if((uintptr_t)packet & 1)
+			goto find;
+		size_t i = (_hv_lseqof(packet, bypass) + state->packet_offset-(uint32_t)state->send_seq_lo);
 		i *= sizeof(struct _hv_send_packet**);
 		if(!(pipe_state->start = packet->next)){
 			// remove
@@ -395,7 +391,7 @@ static void _hv_ackd(struct _hv_remote* state, uint8_t* packet, unsigned plen, u
 			if(i_minlat > 1.f/_HV_SEND_TICK) i_minlat = 1.f/_HV_SEND_TICK;
 			float ipprt = state->us_per_byte * ((p->len4<<2)+48) * i_minlat;
 			if(ipprt > 1.f) ipprt = 1.f;
-			float lat = (int64_t)((t - p->time_lo)<<20)>>20;
+			float lat = (int64_t)((t - p->time_lo)<<21)>>21;
 			float dt = (float)(t - state->min_latency_when) * i_minlat * .03125f;
 			if(lat < state->min_latency * (dt < 1.f ? 1.f : dt)){
 				state->min_latency = lat;
@@ -691,13 +687,6 @@ static void _hv_send_probe_ack_err_enc_bypass(hivemind_server_t* s, uint32_t opt
 	_hv_crcinitless_packet_finish(s, to, packet2, 40, 2);
 }
 
-struct _hv_packet_reassembly{
-	size_t total; union{ size_t cur; uint32_t pipe_next; };
-	uint32_t pipe_last;
-	uint32_t pipe[5];
-	uint8_t data[];
-};
-
 #define _hv_is_worth_move(plen, buflen) ((plen) >= ((buflen)>>1)+((buflen)>>3))
 
 // Contents of recv_queue:
@@ -791,7 +780,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 				struct _hv_tls_packet_detach d = {.packet_on_heap = move ? ~header : plen};
 				_hv_fire_pipe(s, (uint32_t*)(p - 20), p, plen, &d);
 				if(move && d.packet_on_heap == SIZE_MAX){
-					p0 = malloc(buflen);
+					p0 = _hv_alloc(buflen);
 				}
 			}else{
 				// from reassembly completion
@@ -905,9 +894,9 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 			uint8_t* r = p;
 			if(move){
 				*(uint32_t*)(p-4) = next;
-				p = malloc(buflen);
+				p = _hv_alloc(buflen);
 			}else{
-				r = malloc(plen + header) + header;
+				r = _hv_alloc(plen + header) + header;
 				*(uint32_t*)(r-4) = next;
 				memcpy(r, p, plen);
 			}
@@ -1469,7 +1458,11 @@ static void* _hv_listen(void* _){
 			// Fearless freeing!
 			_hv_finish(s, oc->finish_cb, oc->filename[0] ? oc->filename : 0);
 			void (*on_close)(void*) = oc->cb;
-			free(oc);
+		#if _HV_ALLOCATOR_SIZED
+			_hv_free(oc, sizeof(struct _hv_open_close_data) + oc->filenamesz);
+		#else
+			_hv_free(oc, 0);
+		#endif
 			
 			// Safe to teardown
 			x_socket_free(s->handle);
@@ -1501,7 +1494,7 @@ static void* _hv_vq_loop(hivemind_server_t* s){
 	}
 	if(atomic_fetch_sub_explicit(&b->ref, 1, memory_order_acquire) == 1){
 		vqueue_close(&b->q);
-		free(b);
+		_hv_free(b, sizeof(struct _hv_vq));
 	}
 	atomic_store_explicit(&s->vq_flag, 0, memory_order_release);
 	atomic_wake(&s->vq_flag, 1);

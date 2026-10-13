@@ -40,7 +40,7 @@ struct hivemind_server{ union{
 		// You can set individual CIDR mask for IPv6 and IPv4. This mask can be up to 16 bits longer to also match the high bits of the port. Anything higher disables network bypass
 		// The default is 255 for IPv6 (Match IP and port exactly) and 255 for IPv4 (ditto), effectively disabling network bypass
 		// This setting should be identical between servers that expect to use network bypass. Using different settings may lead to one server rejecting packets sent by another.
-		// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send`)
+		// Note that unless hivemind is built with -DHIVEMIND_NO_LOCAL_BYPASS, traffic to the same IP and port will always bypass both the network stack and the kernel, and the message event is delivered synchronously and without copying (see note on `hivemind_send()`)
 		// See also: `encryption_bypass_prefix_v6`, `encryption_bypass_prefix_v4`
 		uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 		// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
@@ -78,7 +78,12 @@ typedef enum hivemind_pipe_close_reason{
 	// Specific failure modes you will actually receive
 	HIVEMIND_CLOSED_MESSAGE_PIPE_REJECTED = 3, // PIPE_INVALID | CONTINUITY_RETAINED. The connection remains open but the remote node rejected the message as the pipe has been closed.
 	HIVEMIND_CLOSED_MESSAGE_PIPE_OUT_OF_BOUNDS = 5, // PIPE_INVALID | CONTINUITY_LOST. This is an old pipe from a previous epoch. Implementation detail: this can be discovered immediately if a connection was already open, or after a few RTTs if it was the opening message of a new connection, which then required a probe packet to discover the reason for failed connection. If this happens, all pipes out of bounds are closed at the same time.
+
+	HIVEMIND_CLOSED_BACKPRESSURE = 16
 } hivemind_pipe_close_reason_t;
+
+#define hivemind_is_err(sz) ((sz) >= SIZE_MAX-63)
+#define hivemind_err(sz) ((sz) >= SIZE_MAX-63 ? sz&63 : 0)
 
 typedef void (*hivemind_generic_fn_t)(void* server);
 typedef void (*hivemind_on_pipe_msg_fn_t)(void* server, void* pipe_data, const uint8_t* data, size_t len);
@@ -137,10 +142,10 @@ void hivemind_pipe_unlock();
 // The message will be copied, `msg` does not need to remain valid after this function returns. This function also performs all of the necessary encryption itself. If the current thread is important (e.g UI thread) and the message is large, you should probably defer this call to another thread
 // BEWARE: If the destination pipe has the same address as the server, the message may be delivered synchronously and copy-less. It is therefore possible for the `on_msg` callback to be called before `hivemind_send()` returns. (Note that `hivemind_packet_detach()` / `hivemind_packet_free()` still work as expected even in this case). This behavior can be disabled by building hivemind with `-DHIVEMIND_NO_LOCAL_BYPASS`.
 // In the case that either the recipient pipe was closed, or a network partition caused a delivery timeout, a message delivery failure notification is sent to f_return_pipe, which must be a pipe belonging to this instance. The pipe's callback will be invoked with `data == NULL` and `len` representing a `hivemind_pipe_close_reason_t`. Passing an f_return_pipe not belonging to (not created by) this server is undefined behavior.
-void hivemind_send(hivemind_server_t* server, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, const hivemind_pipe_t* f_return_pipe, const void* errudata);
+void hivemind_send(hivemind_server_t* server, const hivemind_pipe_t* to, const uint8_t* msg, size_t len, const hivemind_pipe_t* f_return_pipe, uintptr_t errudata);
 
 // Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
-// `on_msg` may also be invoked for this pipe if it is used in a failure return pipe, see the note on `hivemind_send`
+// `on_msg` may also be invoked for this pipe if it is used in a failure return pipe, see the note on `hivemind_send()`
 void hivemind_create_pipe(hivemind_server_t* server, hivemind_pipe_t* pipe, void* udata, hivemind_pipe_qos_t qos);
 // Close a pipe. The return value is the `udata` pointer that was passed to `hivemind_create_pipe()`, or null if the pipe was not found. If the same pipe is closed more than once, only one of them will return the userdata, all others will return null. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`. Calling this function on a pipe not belonging to (not created by) this server is undefined behavior.
 // Message delivery failure notifications will also follow the same semantics as regular messages: if they would be delivered after this close, they are instead discarded.

@@ -1,12 +1,12 @@
 # <img src="./helipad512.png" alt="Helipad-style logo" width="64" style="vertical-align: middle; margin-right: 12px" /> **Hivemind**
 
-**<u>East-west traffic. Safe. Fast. Reliable. No bloat.</u>**
+### East-west traffic. [Safe](#safety-against-adversarial-network-participants). [Fast](#optimized-for-low-latency-and-high-throughput). [Reliable](#reliability-via-clean-failure-modes). [No bloat](#minimalism-by-design).
 
 For node bindings, jump to [Getting started (node.js)](#getting-started-nodejs)
 
 ## Building
 
-Clang and `-flto` are preferred for performance.
+Clang and `-flto` are preferred for performance. Architecture-specific optimizations such as SSE are detected automatically and (usually) do not need flags.
 ```bash
 clang -c src/main.c -Iinclude -O3 -mcx16 -Wall -Wextra -Wno-unused -std=c11 -pthread -flto -o hivemind.o \
 	&& ar rcs hivemind.a hivemind.o
@@ -18,7 +18,7 @@ Supported platforms
 - Linux
 - FreeBSD, NetBSD, OpenBSD
 - MacOS
-- ~~Windows~~
+- ~~Windows~~ (Planned)
 
 ## Getting started (C)
 
@@ -59,7 +59,7 @@ int main(){
 
 	// Potentially on another machine/instance
 	const char* data = "Hello, world!";
-	hivemind_send(&h_server, &pipe, &data, sizeof(data), NULL, NULL);
+	hivemind_send(&h_server, &pipe, &data, sizeof(data), NULL, 0);
 }
 ```
 
@@ -85,3 +85,25 @@ const pipe: ArrayBuffer = hServer.createPipe(onMsg)
 // Potentially on another machine/instance
 hServer.send(pipe, new TextEncoder().encode('Hello, world!'))
 ```
+
+## Safety against adversarial network participants
+
+On open networks, it is important to enforce data secrecy, integrity and authenticity, achieved using a cipher suite, in this case, ChaCha20-Poly1305. Endpoints not exposed to end-users should not create additional attack surfaces, of most immediate concern being denial-of-service attacks. Asymmetric key exchange algorithms (such as X25519) are slow and prone to deprecation as cryptanalysis advances. They are a necessary evil for north-south (client-server) traffic, but for east-west (server-server) traffic, simpler one-way key sharing is preferred. Hivemind uses a custom hashing construction based on ChaCha20 to derive a shared ephemeral secret from a pre-shared key, which is then used to encrypt and authenticate messages.
+
+## Optimized for low latency and high throughput
+
+The protocol is designed to minimize the number of round trips required to establish a connection and exchange data (see above). Under normal network conditions, time-to-first-byte for any message is limited only by the physical link latency (i.e 0.5RTT). The lack of bilateral key exchange step also means no cold starts for node pairs that have not recently exchanged messages. Packets are encoded tightly to reduce all but the absolutely necessary overhead.
+
+Hivemind also offering options to bypass certain layers of abstraction given some assumptions about the network topology
+- Encryption can be bypassed for recipients in the same closed network. Packet corruption is defended-against using CRC64 instead of Poly1305.
+- IP/UDP can be bypassed when the recipient lives in the same broadcast domain (Layer 2).
+- The entire network stack (and the kernel when under load) can be bypassed when the recipient lives on the same machine, via shared-memory IPC (Current implementation: [vqueue](https://github.com/BlobTheKat/vqueue)).
+- Copy-less (pass-by-reference) when the recipient is in the same process.
+All 5 modes of communication are completely transparent at the API level and can be used simultaneously, the protocol will automatically select the fastest available mode for a given recipient.
+
+## Reliability via clean failure modes
+
+Retransmission is handled automatically, however, relying on guaranteed eventual delivery is not a viable strategy for large scale systems with many nodes and independent failure points. Under some consistency models, synchronization at scale can also be a hard problem, especially when trying to avoid relying on a channel or resource after it has been reclaimed. Hivemind exposes a unified message delivery failure route to the application layer in a manner that does not increase complexity or require additional state management, and at negligible runtime overhead.
+
+## Minimalism by design
+

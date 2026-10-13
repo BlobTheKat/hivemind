@@ -113,11 +113,11 @@ template<typename T_ = Self, typename P = void> struct Server: hivemind_server_t
 	// The message will be copied, `msg` does not need to remain valid after this function returns. This function also performs all of the necessary encryption itself. If the current thread is important (e.g UI thread) and the message is large, you should probably defer this call to another thread
 	// BEWARE: If the destination pipe has the same address as the server, the message may be delivered synchronously and copy-less. It is therefore possible for the `on_msg` callback to be called before `hivemind_send()` returns. (Note that `hivemind_packet_detach()` / `hivemind_packet_free()` still work as expected even in this case). This behavior can be disabled by building hivemind with `-DHIVEMIND_NO_LOCAL_BYPASS`.
 	void send(const Pipe& to, const uint8_t* msg, size_t len){
-		hivemind_send(this, to, msg, len, NULL, NULL);
+		hivemind_send(this, to, msg, len, NULL, 0);
 	}
 	// Overload of `send()` that accepts any type that has a contiguous data representation, such as `std::vector`, `std::string`, `std::array`, etc.
 	template<typename T2> void send(const Pipe& to, const T2& data){
-		hivemind_send(this, to, (uint8_t*) data.data(), (const size_t&) data.size(), NULL, NULL);
+		hivemind_send(this, to, (uint8_t*) data.data(), (const size_t&) data.size(), NULL, 0);
 	}
 	// Create a new pipe to listen on. The `udata` pointer is not interpreted by the library, but will be passed to the `on_msg` callback when a message is received on this pipe. For concurrency and use-after-free concerns, see the note on `hivemind_pipe_unlock()`.
 	Pipe create_pipe(P* udata = 0, Pipe::QOS qos = Pipe::QOS::FASTER){

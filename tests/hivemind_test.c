@@ -64,7 +64,7 @@ int main(){
 	t0 = (double) mono_now();
 	cnt = 100;
 	for(unsigned i = 0; i < 100; i++){
-		hivemind_send(&ser, &recpt, data, sizeof(data), NULL, NULL);
+		hivemind_send(&ser, &recpt, data, sizeof(data), NULL, 0);
 	}
 
 	atomic_wait_until(&cnt, !cnt);
