@@ -102,13 +102,14 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			p += 64 + w*68;
 			for(; rsz; rsz--){
 				unsigned sz = _hv_read32(p);
-				sfat_pointer_t p0;
-				if((sz-1) < 0xFFFE){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
+				uintptr_t p0;
+				if(sz < 0x10000){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
 					uint8_t* p2 = _hv_alloc(sz + (bypass?12:20)) + (bypass?12:20);
 					*(uint32_t*)(p2-4) = _hv_read32(p+4);
+					*(uint16_t*)(p2-6) = sz;
 					memcpy(p2, p+8, sz);
 					p += 8+sz;
-					p0 = sfat_pack(p2, sz);
+					p0 = (uintptr_t)p2 | 2;
 				}else if(sz > 0x3ffff){
 					// block
 					size_t cur = _hv_read48(p+10);
@@ -120,13 +121,13 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 					memcpy(block->pipe, p+24, 20);
 					memcpy(block->data, p+44, cur);
 					p += 44+cur;
-					p0 = sfat_pack(block, sz&0x10000 ? 0xFFFF : 0);
+					p0 = (uintptr_t)block;
 				}else if(sz > 0x1ffff){
 					// dep
-					p0 = sfat_pack(_hv_read32(p+4), 0xFFFE);
+					p0 = _hv_read32(p+4)<<1|1;
 					p += 8;
 				}else{
-					p0 = sfat_pack(0, sz&0x10000 ? 0xFFFF : 0);
+					p0 = sz&3;
 					p += 4;
 				}
 				ring_buffer_push(&state->recv_queue, &p0, sizeof(p0), true);
@@ -254,7 +255,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					_hv_write64(head+32, rl);
 					_hv_write32(head+40, state->recv_seq_hi);
 					_hv_write64(head+44, state->recv_seq_lo);
-					_hv_write32(head+52, rsz / sizeof(sfat_pointer_t));
+					_hv_write32(head+52, rsz / sizeof(uintptr_t));
 					_hv_write64(head+56, state->key_derived_when);
 					head += 64;
 				}
@@ -272,39 +273,32 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 				if(r){
 					ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, -1ull);
 					assert(it.remaining == rsz);
-					sfat_pointer_t p;
-					while(ring_iterator_next(&it, &p, sizeof(p), true)){
-						unsigned sz = sfat_size(p);
-						uint8_t* data = sfat_get(p);
+					uintptr_t cur;
+					while(ring_iterator_next(&it, &cur, sizeof(cur), true)){
 						uint8_t* buf2;
-						if(!sz){
-							if(data){
-								buf2 = array_buffer_push_garbage(&b.buf, 44 + ((struct _hv_packet_reassembly*)data)->cur);
-								_hv_write32(buf2, 0x40000);
-								write_block: {}
-								struct _hv_packet_reassembly* block = (struct _hv_packet_reassembly*)data;
-								_hv_write48(buf2+4, block->total);
-								_hv_write48(buf2+10, block->cur);
-								_hv_write32(buf2+16, block->pipe_last);
-								_hv_write32(buf2+20, block->pipe_next);
-								memcpy(buf2+24, block->pipe, 20);
-								memcpy(buf2+44, block->data, block->cur);
-							}else array_buffer_push_memset(&b.buf, 0, 4);
-						}else if(sz == 0xFFFE){
-							buf2 = array_buffer_push_garbage(&b.buf, 8);
-							_hv_write32(buf2, 0x20000);
-							_hv_write32(buf2+4, (uint32_t)(uintptr_t)data);
-						}else if(sz == 0xFFFF){
-							if(data){
-								buf2 = array_buffer_push_garbage(&b.buf, 20 + ((struct _hv_packet_reassembly*)data)->cur);
-								_hv_write32(buf2, 0x50000);
-								goto write_block;
-							}else _hv_write32(array_buffer_push_garbage(&b.buf, 4), 0x10000);
-						}else{
+						if(cur<4){
+							_hv_write32(array_buffer_push_garbage(&b.buf, 4), 0x10000|cur);
+						}else if(!(cur&3)){
+							struct _hv_packet_reassembly* block = (struct _hv_packet_reassembly*)cur;
+							buf2 = array_buffer_push_garbage(&b.buf, 44 + block->cur);
+							_hv_write32(buf2, 0x40000);
+							_hv_write48(buf2+4, block->total);
+							_hv_write48(buf2+10, block->cur);
+							_hv_write32(buf2+16, block->pipe_last);
+							_hv_write32(buf2+20, block->pipe_next);
+							memcpy(buf2+24, block->pipe, 20);
+							memcpy(buf2+44, block->data, block->cur);
+						}else if((cur&3)==2){
+							uint8_t* p = (uint8_t*)(cur-2);
+							unsigned sz = *(uint16_t*)(p-6);
 							buf2 = array_buffer_push_garbage(&b.buf, sz+8);
 							_hv_write32(buf2, sz); // Upper 16 bits zero
-							_hv_write32(buf2+4, *(uint32_t*)(data-4));
-							memcpy(buf2+8, data, sz);
+							_hv_write32(buf2+4, *(uint32_t*)(p-4)); // copied separately because endianness
+							memcpy(buf2+8, p, sz);
+						}else{
+							buf2 = array_buffer_push_garbage(&b.buf, 8);
+							_hv_write32(buf2, 0x20000);
+							_hv_write32(buf2+4, (uint32_t)cur >> 1);
 						}
 					}
 				}

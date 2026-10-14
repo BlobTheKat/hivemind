@@ -375,12 +375,11 @@ struct _hv_packet_reassembly{
 
 static inline void _hv_remote_cleanup_recv(struct _hv_remote* state, bool bypass){
 	ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, SIZE_MAX);
-	sfat_pointer_t ptr;
+	uintptr_t ptr;
 	while(ring_iterator_next(&it, &ptr, sizeof(ptr), true)){
-		unsigned sz = sfat_size(ptr);
-		void* ptr = sfat_get(ptr);
-		if(!sz || sz == 0xFFFF){ if(ptr) _hv_free(ptr, sizeof(struct _hv_packet_reassembly) + ((struct _hv_packet_reassembly*)ptr)->total); }
-		else if(sz < 0xFFFE) free((uint8_t*)ptr - (bypass ? 12 : 20));
+		if(ptr <= 3) continue;
+		if(!(ptr&3)) _hv_free((void*)ptr, sizeof(struct _hv_packet_reassembly) + ((struct _hv_packet_reassembly*)ptr)->total);
+		else if((ptr&3)==2) free((uint8_t*)(ptr - 2 - (bypass ? 12 : 20)));
 	}
 	ring_buffer_destroy(&state->recv_queue);
 	memset(&state->recv_queue, 0, sizeof(ring_buffer_t));

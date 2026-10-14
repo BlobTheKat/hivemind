@@ -90,8 +90,3 @@ templated size_t array_iterator_next(array_iterator_t* obj, void* d, size_t sz);
 templated void array_buffer_destroy(array_buffer_t* obj);
 
 #undef templated
-
-typedef uint64_t sfat_pointer_t;
-#define sfat_pack(p, s) ((uintptr_t)(p)<<16|(s))
-#define sfat_get(p) (uint8_t*)((uintptr_t)(p)>>16)
-#define sfat_size(p) ((uintptr_t)(p)&0xFFFF)

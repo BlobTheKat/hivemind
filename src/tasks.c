@@ -1,3 +1,4 @@
+#include "dbg.h"
 #include "internals.c"
 #include "plumbing.c"
 #ifndef _WIN32
@@ -690,12 +691,20 @@ static void _hv_send_probe_ack_err_enc_bypass(hivemind_server_t* s, uint32_t opt
 #define _hv_is_worth_move(plen, buflen) ((plen) >= ((buflen)>>1)+((buflen)>>3))
 
 // Contents of recv_queue:
+// OLD
 // size=0 ptr=0 -> None
 // size=0 ptr=X -> Reassembly head
 // size=N ptr=X -> Saved packet
 // size=65535 ptr=0 -> Already received
 // size=65535 ptr=N -> Already received dependent packet (fully reassembled, waiting)
 // size=65534 ptr=N -> Dependent packet idx
+
+// NEW
+// (seq<<1|1) > 3 -> Dependent packet idx
+// ptr (algn 4) -> reassembly head
+// ptr (algn 4) | 2 -> Saved packet. Fully reassembled if cur == total
+// 0 -> Not received
+// 1,2,3 -> Already received (Ok, Pipe Err, Range Err)
 
 // Ack scheme
 // The last packet to be acked of a given message must be the last packet of the message
@@ -708,25 +717,30 @@ static inline bool _hv_block_add(struct _hv_packet_reassembly* block, uint8_t* p
 	return avail <= plen;
 }
 
-#define _hv_is_partial(p) ((sfat_size(p)-1)<0xFFFD)
+#define _hv_is_partial(p) ((p)>3&&((p)&3)==2)
+#define _hv_is_reassembly(p) ((p)>3&&!((p)&3))
+
 static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* state, const remote_t* from, unsigned plen, uint64_t lo, uint32_t hi, uint8_t* p0, unsigned header, unsigned buflen, uint64_t tim, uint64_t msglen, uint32_t pipe_last, bool bypass){
 	uint8_t* p = p0 + header;
-	uint64_t idx = (lo - state->recv_seq_lo) * sizeof(sfat_pointer_t);
+	uint64_t idx = (lo - state->recv_seq_lo) * sizeof(uintptr_t);
 	bool ack = true;
 	uint32_t lo32 = (uint32_t)lo, next = lo32;
 	if(idx >= ring_buffer_size(&state->recv_queue)){
 		ring_buffer_push_memset(&state->recv_queue, 0, idx - ring_buffer_size(&state->recv_queue), false);
 	}else{
-		sfat_pointer_t cur;
+		uintptr_t cur;
 		ring_buffer_get(&state->recv_queue, idx, &cur, sizeof(cur), true);
 		if(cur){
-			unsigned sz = sfat_size(cur);
-			if(sz == 0xFFFE){
+			if(cur < 4){
+				// already processed
+				_hv_queue_ack(state, lo, hi, tim, false, bypass);
+				goto done;
+			}else if(cur&1){
 				// dependent
-				next = (uint32_t)sfat_get(cur);
+				next += cur>>1;
 			}else{
-				// Ack if this packet is a first or already received, or if the next packet has arrived
-				if(sz == 0xFFFF ? !sfat_get(cur) : !sz || (idx != ring_buffer_size(&state->recv_queue) && (ring_buffer_get(&state->recv_queue, idx + sizeof(sfat_pointer_t), &cur, sizeof(cur), true), cur && sfat_size(cur) != 0xFFFE)))
+				// Ack if this packet is an unfinished reassembly (then it's not the last) or if the next packet has already arrived and it's also a partial (then it's also not the last)
+				if(cur&2 ? (idx != ring_buffer_size(&state->recv_queue) && (ring_buffer_get(&state->recv_queue, idx + sizeof(uintptr_t), &cur, sizeof(cur), true), _hv_is_partial(cur)) : (((struct _hv_packet_reassembly)cur)->cur < ((struct _hv_packet_reassembly)cur)->total))
 					_hv_queue_ack(state, lo, hi, tim, false, bypass);
 				goto done;
 			}
@@ -738,18 +752,25 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 		if(plen >= msglen){
 			msg_complete:
 			if(pipe_last == lo32) goto skip_check;
-			uint64_t idx2 = (pipe_last - state->recv_seq_lo) * sizeof(sfat_pointer_t);
+			uint64_t idx2 = (pipe_last - state->recv_seq_lo) * sizeof(uintptr_t);
 			if(idx2 >= ring_buffer_size(&state->recv_queue)){
 				//assert(false, "pipe_next points forward");
 				goto skip_check;
 			}
-			sfat_pointer_t cur2;
-			ring_buffer_get(&state->recv_queue, idx2, &cur2, sizeof(cur2), true);
-			unsigned sz = sfat_size(cur2);
-			if(sz == 0xFFFF){
-				// Already received
-				struct _hv_packet_reassembly* dep = (struct _hv_packet_reassembly*)sfat_get(cur2);
-				if(dep){
+			uintptr_t cur;
+			ring_buffer_get(&state->recv_queue, idx2, &cur, sizeof(cur), true);
+			if(!cur){
+				cur = (lo32-pipe_last)<<1 | 1;
+				ring_buffer_set(&state->recv_queue, idx2, &cur, sizeof(cur), true);
+				goto realloc_and_put;
+			}else if(cur > 3){
+				if unlikely(!soft_assert(!(cur&1))) goto realloc_and_put; // should never happen in practice since this packet would have been already received and ignored
+				if(cur&2){
+					uint8_t* dep = (uint8_t*)(cur-2);
+					*(uint32_t*)(dep-4) = lo32;
+					goto realloc_and_put;
+				}else{
+					struct _hv_packet_reassembly* dep = (struct _hv_packet_reassembly*)cur;
 					// dependency
 					dep->pipe_next = lo32;
 					realloc_and_put:
@@ -761,16 +782,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 						memcpy(block->data, p, msglen);
 					}
 					goto trim;
-				}//else normal case
-			}else if(!sz){
-				assert(!cur2);
-				cur2 = sfat_pack(lo32, 0xFFFE);
-				ring_buffer_set(&state->recv_queue, idx2, &cur2, sizeof(cur2), true);
-				goto realloc_and_put;
-			}else if(sz < 0xFFFE){
-				uint8_t* dep = (uint8_t*)sfat_get(cur2);
-				*(uint32_t*)(dep-8) = lo32;
-				goto realloc_and_put;
+				}
 			}
 			skip_check:
 			// fire msg
@@ -790,12 +802,12 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 			}
 			while(next != lo32){
 				size_t idx2 = pipe_last - state->recv_seq_lo;
-				idx2 *= sizeof(sfat_pointer_t);
+				idx2 *= sizeof(uintptr_t);
 				assert(idx2 < ring_buffer_size(&state->recv_queue));
 				assert(idx2 > idx);
-				ring_buffer_get(&state->recv_queue, idx2, &cur2, sizeof(cur2), true);
-				assert(sfat_size(cur2) == 0xFFFF);
-				block = sfat_get(cur2);
+				ring_buffer_get(&state->recv_queue, idx2, &cur, sizeof(cur), true);
+				assert(cur > 3 && !(cur&3));
+				block = (struct _hv_packet_reassembly*)cur;
 				struct _hv_tls_packet_detach d = {.packet_on_heap = ~sizeof(struct _hv_packet_reassembly)};
 				_hv_queue_ack(state, lo, hi, tim, false, bypass);
 				lo = (lo32 | state->recv_seq_lo&0xFFFFFFFF00000000ull) + (uint64_t)(lo32 < (uint32_t)state->send_seq_lo)<<32;
@@ -803,25 +815,23 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 				_hv_fire_pipe(s, block->pipe, block->data, block->total, &d);
 				lo32 = next; next = block->pipe_next;
 				if(d.packet_on_heap != SIZE_MAX) free(block);
-				cur2 = sfat_pack(0, 0xFFFF);
-				ring_buffer_set(&state->recv_queue, idx2, &cur2, sizeof(cur2), true);
+				cur = 1;
+				ring_buffer_set(&state->recv_queue, idx2, &cur, sizeof(cur), true);
 			}
 			_hv_queue_ack(state, lo, hi, tim, false, bypass);
 			trim:
 			if(idx){
-				sfat_pointer_t cur = sfat_pack(0, 0xFFFF);
+				cur = 1;
 				ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
 			}else{
 				while(true){
-					idx += sizeof(sfat_pointer_t);
-					sfat_pointer_t cur;
-					ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
-					if(sfat_size(cur) != 0xFFFF) break;
-					assert(!sfat_get(cur));
-					if unlikely(sfat_get(cur)) free(sfat_get(cur));
+					idx += sizeof(uintptr_t);
+					ring_buffer_get(&state->recv_queue, idx, &cur, sizeof(cur), true);
+					if unlikely(!soft_assert(cur > 3)) free((void*)(cur&2 ? cur - 2 - (bypass ? 12 : 20) : cur));
+					if(cur != 1) break;
 				}
 				uint64_t seq_lo = state->send_seq_lo;
-				if(state->send_seq_lo = (seq_lo + idx/sizeof(sfat_pointer_t)) < seq_lo) state->send_seq_hi++;
+				if(state->send_seq_lo = (seq_lo + idx/sizeof(uintptr_t)) < seq_lo) state->send_seq_hi++;
 				ring_buffer_shift_discard(&state->recv_queue, idx, false);
 			}
 		}else{
@@ -838,77 +848,73 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 			block->pipe_last = pipe_last;
 			assert(next == lo32);
 			add_more:
-			if(idx + sizeof(sfat_pointer_t) < ring_buffer_size(&state->recv_queue)){
-				sfat_pointer_t cur;
-				ring_buffer_get(&state->recv_queue, idx + sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+			if(idx + sizeof(uintptr_t) < ring_buffer_size(&state->recv_queue)){
+				uintptr_t cur;
+				ring_buffer_get(&state->recv_queue, idx + sizeof(uintptr_t), &cur, sizeof(cur), true);
 				if(_hv_is_partial(cur)){
 					_hv_queue_ack(state, lo, hi, tim, false, bypass);
 					next:
-					uint8_t* p2 = sfat_get(cur);
-					bool end = _hv_block_add(block, p2, sfat_size(cur));
+					uint8_t* p2 = (uint8_t*)(cur - 2);
+					bool end = _hv_block_add(block, p2, *(uint16_t*)(p2-6));
 					free(p2 - (bypass ? 12 : 20)); // current `header` is for first-of-a-message packet
-					cur = sfat_pack(0, 0xFFFF);
+					cur = 1;
 					ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
 
-					idx += sizeof(sfat_pointer_t);
+					idx += sizeof(uintptr_t);
 					lo32++; if(!++lo) hi++;
 					if(end){
 						block->pipe_next = next = *(uint32_t*)(p2-4);
 						goto msg_complete;
 					}
-					ring_buffer_get(&state->recv_queue, idx + sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+					ring_buffer_get(&state->recv_queue, idx + sizeof(uintptr_t), &cur, sizeof(cur), true);
 					if(_hv_is_partial(cur)) goto next;
-					cur = sfat_pack(block, 0);
+					cur = (uintptr_t)block;
 					ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
 				}
 			}
 		}
 	}else{
 		if(!idx) goto done;
-		sfat_pointer_t cur;
-		ring_buffer_get(&state->recv_queue, idx - sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
-		unsigned sz = sfat_size(cur);
-		if(!sz){
-			block = sfat_get(cur);
-			if(!block) goto add;
+		uintptr_t cur;
+		ring_buffer_get(&state->recv_queue, idx - sizeof(uintptr_t), &cur, sizeof(cur), true);
+		if(_hv_is_reassembly(cur)){
+			block = (struct _hv_packet_reassembly*)cur;
 			pipe_last = block->pipe_last;
 			bool end = _hv_block_add(block, p, plen);
 			if(end){
-				if(idx == sizeof(sfat_pointer_t)){
+				if(idx == sizeof(uintptr_t)){
 					idx = 0;
-					ring_buffer_shift_discard(&state->recv_queue, sizeof(sfat_pointer_t), false);
+					ring_buffer_shift_discard(&state->recv_queue, sizeof(uintptr_t), false);
 					if(!++state->recv_seq_lo) state->recv_seq_hi++;
 				}else{
-					cur = sfat_pack(0, 0xFFFF);
-					ring_buffer_set(&state->recv_queue, idx - sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+					cur = 1;
+					ring_buffer_set(&state->recv_queue, idx - sizeof(uintptr_t), &cur, sizeof(cur), true);
 				}
 				block->pipe_next = next;
 				goto msg_complete;
 			}else{
-				cur = sfat_pack(0, 0xFFFF);
-				ring_buffer_set(&state->recv_queue, idx - sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+				cur = 1;
+				ring_buffer_set(&state->recv_queue, idx - sizeof(uintptr_t), &cur, sizeof(cur), true);
 				goto add_more;
 			}
 		}else add: {
-			bool move = _hv_is_worth_move(plen, buflen);
 			uint8_t* r = p;
-			if(move){
-				*(uint32_t*)(p-4) = next;
-				p = _hv_alloc(buflen);
-			}else{
+			if(_hv_is_worth_move(plen, buflen)) p = _hv_alloc(buflen);
+			else{
 				r = _hv_alloc(plen + header) + header;
-				*(uint32_t*)(r-4) = next;
 				memcpy(r, p, plen);
 			}
-			sfat_pointer_t cur = sfat_pack(r, plen);
+			*(uint32_t*)(r-4) = next;
+			*(uint16_t*)(r-6) = plen;
+			cur = (uintptr_t)r | 2;
 			ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
 			if(soft_assert(idx)){
-				ring_buffer_get(&state->recv_queue, idx - sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+				ring_buffer_get(&state->recv_queue, idx - sizeof(uintptr_t), &cur, sizeof(cur), true);
 				if(_hv_is_partial(cur))
 					_hv_queue_ack(state, lo-1, hi - !lo, tim, false, bypass);
 			}
-			if(idx < ring_buffer_size(&state->recv_queue) - sizeof(sfat_pointer_t)){
-				ring_buffer_get(&state->recv_queue, idx + sizeof(sfat_pointer_t), &cur, sizeof(cur), true);
+			if(idx < ring_buffer_size(&state->recv_queue) - sizeof(uintptr_t)){
+				ring_buffer_get(&state->recv_queue, idx + sizeof(uintptr_t), &cur, sizeof(cur), true);
 				if(_hv_is_partial(cur))
 					_hv_queue_ack(state, lo, hi, tim, false, bypass);
 			}
@@ -1047,10 +1053,10 @@ static uint8_t* _hv_drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned 
 					_hv_time_lock_rel(&state->recv_last_used, tim);
 					continue;
 				}
-				idx *= sizeof(sfat_pointer_t);
+				idx *= sizeof(uintptr_t);
 				if(idx > 0 && idx < ring_buffer_size(&state->recv_queue)){
-					sfat_pointer_t p;
-					ring_buffer_get(&state->recv_queue, idx, &p, sizeof(sfat_pointer_t), true);
+					uintptr_t p;
+					ring_buffer_get(&state->recv_queue, idx, &p, sizeof(uintptr_t), true);
 					if(p) goto ack_abort;
 				}
 				*(uint32_t*)packet = htole32(hi); *(uint32_t*)(packet+4) = htole32(lo>>32);
@@ -1220,10 +1226,10 @@ static uint8_t* _hv_drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned 
 				_hv_time_lock_rel(&state->recv_last_used, tim);
 				continue;
 			}
-			idx *= sizeof(sfat_pointer_t);
+			idx *= sizeof(uintptr_t);
 			if(idx > 0 && idx < ring_buffer_size(&state->recv_queue)){
-				sfat_pointer_t p;
-				ring_buffer_get(&state->recv_queue, idx, &p, sizeof(sfat_pointer_t), true);
+				uintptr_t p;
+				ring_buffer_get(&state->recv_queue, idx, &p, sizeof(uintptr_t), true);
 				if(p) goto ack_abort2;
 			}
 			chacha_in[13] = (uint32_t)lo; chacha_in[14] = (uint32_t)(lo>>32); chacha_in[15] = hi;

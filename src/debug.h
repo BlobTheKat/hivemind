@@ -20,13 +20,13 @@ static void check_send(struct _hv_remote* state){
 deprecate("Debug")
 static bool validate_ack(struct _hv_remote* state, uint64_t seq){
 	size_t idx = (seq-state->recv_seq_lo);
-	if(idx > SIZE_MAX/sizeof(sfat_pointer_t)) return true;
+	if(idx > SIZE_MAX/sizeof(uintptr_t)) return true;
 	size_t sz = ring_buffer_size(&state->recv_queue);
-	idx *= sizeof(sfat_pointer_t);
+	idx *= sizeof(uintptr_t);
 	if(idx >= sz) return false;
-	sfat_pointer_t m;
+	uintptr_t m;
 	ring_buffer_get(&state->recv_queue, idx, &m, sizeof(m), true);
-	return !!sfat_get(m);
+	return m;
 }
 
 static array_buffer_t logs;
