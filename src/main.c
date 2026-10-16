@@ -1,5 +1,4 @@
-#include "internals.c"
-#include "save.c"
+#include "tasks.c"
 
 void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_on_pipe_msg_fn_t on_msg){
 	memset(s, 0, sizeof(*s));
@@ -272,14 +271,14 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 			first_mtu -= 16;
 		}
 		if unlikely((size_t)rsz + num_packets > 0x80000000) overflow: {
+			// Don't do this if coming from kex path (goto overflow;)
+			if(!plen) _hv_add_to_send_pipe(state, to->id, plch.next, &plch.next, 0, &plch);
+			_hv_time_lock_rel(&state->send_last_used, tim);
 			if(f_return_pipe){
 				struct _hv_tls_packet_detach d = {.packet_on_heap = SIZE_MAX};
 				_hv_fire_pipe(s, f_return_pipe->id, (uint8_t*)errudata, (SIZE_MAX-63) | HIVEMIND_CLOSED_BACKPRESSURE, &d);
 			}
-			// Don't do this if coming from kex path (goto overflow;)
-			if(!plen) _hv_add_to_send_pipe(state, to->id, plch.next, &plch.next, 0, &plch);
-			num_packets = 0; // suppress freeing packets since we didn't allocate it
-			goto end;
+			return;
 		}
 		last = num_packets == 1;
 		plen = last ? (unsigned)pad_len : first_mtu;
@@ -369,7 +368,6 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 		if(!atomic_compare_exchange_weak_explicit(&_hv_meta.undrained, &n, state, memory_order_acq_rel, memory_order_relaxed)) goto retry_acq2;
 		x_event_queue_wake(&_hv_meta.queue, _HV_SEND_TICK);
 	}
-	end:
 	_hv_time_lock_rel(&state->send_last_used, tim);
 	if(num_packets > 8) _hv_free(packets, num_packets * sizeof(struct _hv_send_packet*));
 }

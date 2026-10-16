@@ -452,6 +452,8 @@ void _hv_add_to_send_pipe(struct _hv_remote* state, const uint32_t id[5], struct
 	pipe_state->queued += dwords;
 	*plch->prevp = nfirst;
 	*nlast = plch->next;
+	// The placeholder lives on the caller's stack, don't leave the pipe's tail pointing into it
+	if(pipe_state->end == &plch->next) pipe_state->end = nlast;
 	if((uintptr_t)plch->next & 1){
 		struct _hv_send_packet_placeholder* p2 = (struct _hv_send_packet_placeholder*)((uintptr_t)plch->next-1);
 		p2->prevp = nlast;
@@ -525,3 +527,26 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pip
 #else
 	#define _hv_state_handle(s) (s)->server->handle
 #endif
+
+// Hazard slots in this implementation follow a thread-to-thread linked list (it's all allocated in the stack) protected by threads_lock
+struct _hv_thread{
+	atomic(struct _hv_thread*) next, *prevp;
+	// Hazard pointer for GC and UDP reads
+	atomic(void*) hazard;
+};
+struct{
+	x_event_queue_t queue;
+	lock_t threads_lock;
+	uint32_t threads_max, threads_cur;
+	atomic(struct _hv_remote*) undrained;
+	atomic(struct _hv_remote*) unsent_ack;
+	atomic(hivemind_server_t*) read_help_requested;
+	atomic(uint64_t) last_gc;
+	atomic(hivemind_server_t*) servers;
+	atomic(struct _hv_thread*) threads;
+} _hv_meta = {
+	.threads_lock = 1,
+	.undrained = (struct _hv_remote*)1,
+	.unsent_ack = (struct _hv_remote*)1
+};
+static_assert(alignof(thread_t) <= alignof(max_align_t));
