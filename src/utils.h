@@ -133,6 +133,14 @@ noinline char* _ring_buffer_grow(ring_buffer_t* obj, char* dat, size_t* cap, siz
 	return dat2;
 }
 
+templated void ring_buffer_reserve(ring_buffer_t* obj, size_t sz){
+	size_t cap = obj->cap_exp; char* dat;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
+	else cap = 1ull<<(int)cap, dat = obj->data;
+	if(sz > cap)
+		_ring_buffer_grow(obj, dat, &cap, sz);
+}
+
 templated size_t ring_buffer_push_garbage(ring_buffer_t* obj, size_t sz, bool _aligned){
 	size_t cap = obj->cap_exp; char* dat;
 	if(!cap) cap = sizeof(char*), dat = obj->data_i;
@@ -331,6 +339,15 @@ noinline char* _array_buffer_grow(array_buffer_t* obj, char* dat, size_t* cap, s
 	if(dat!=obj->data_i) free(dat);
 	obj->data = dat2;
 	return dat2;
+}
+
+templated void array_buffer_reserve(array_buffer_t* obj, size_t sz){
+	size_t cap = obj->cap_exp, size = obj->size;
+	char* dat;
+	if(!cap) cap = sizeof(char*), dat = obj->data_i;
+	else cap = 1ull<<(int)cap, dat = obj->data;
+	if(sz > cap)
+		_array_buffer_grow(obj, dat, &cap, sz);
 }
 
 noinline void _array_buffer_shrink(array_buffer_t* obj){

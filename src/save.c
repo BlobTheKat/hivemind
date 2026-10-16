@@ -1,3 +1,4 @@
+#include "internals.c"
 #define _HV_SAVE_HEADER_SZ 96
 #include "tasks.c"
 
@@ -20,6 +21,164 @@ static inline uint32_t _hv_read32(const uint8_t* p){
 }
 static inline void _hv_write32(uint8_t* p, uint32_t x){
 	p[0] = (uint8_t)(x>>24); p[1] = (uint8_t)(x>>16); p[2] = (uint8_t)(x>>8); p[3] = (uint8_t)x;
+}
+
+// Send packet record: { u32 len | first<<16 | kex<<17 | has_err_fb<<18, payload4[len>>2] } + if has_err_fb: { return pipe id[20], u64 errudata }
+// The payload is stored as is: already encrypted for packets in send order, plaintext for unsent ones (they're encrypted when drained)
+// errudata is saved as a number, it is never a pointer
+// A slot record of just _HV_SAVE_UNSENT marks a slot whose packet is saved with its pipe, after the slots
+#define _HV_SAVE_UNSENT 0x80000000u
+// Unsent pipe record: { id[20], u64 queued (QoS in the top 2 bits), u32 dependency_hi, u64 dependency_lo, u64 packet count } + packet records
+#define _HV_SAVE_PIPE_SZ 48
+#define _HV_SAVE_ERR_FB_SZ 28
+// Size of a packet record (not an _HV_SAVE_UNSENT slot) from its header word
+#define _hv_save_record_sz(hdr) (4 + ((hdr) & 0xFFFC) + ((hdr)>>18&1 ? _HV_SAVE_ERR_FB_SZ : 0))
+
+static inline void _hv_save_send_packet(array_buffer_t* buf, struct _hv_send_packet* p){
+	unsigned sz = p->len4<<2;
+	uint8_t* p2 = array_buffer_push_garbage(buf, sz+4+(p->has_err_fb?_HV_SAVE_ERR_FB_SZ:0));
+	_hv_write32(p2, sz | (uint32_t)(p->first<<16) | (uint32_t)(p->kex<<17)|(uint32_t)(p->has_err_fb<<18)); // Upper 13 bits reserved
+	memcpy(p2+4, p->payload4, sz);
+	if(p->has_err_fb){
+		const uint32_t* fb = p->payload4 + p->len4;
+		memcpy(p2+4+sz, fb, 20);
+		// Stored natively by hivemind_send
+		uint64_t errudata = fb[5];
+#if UINTPTR_MAX > UINT32_MAX
+		errudata |= (uint64_t)fb[6]<<32;
+#endif
+		_hv_write64(p2+24+sz, errudata);
+	}
+}
+
+// Returns the end of the record, or 0 if it's truncated. *out is 0 for an empty record
+static inline uint8_t* _hv_load_send_packet(uint8_t* p, uint8_t* end, struct _hv_send_packet** out){
+	if(p+4 > end) return 0;
+	uint32_t hdr = _hv_read32(p);
+	unsigned sz = hdr & 0xFFFC;
+	bool err_fb = hdr>>18&1;
+	uint8_t* next = p+4+sz+(err_fb?_HV_SAVE_ERR_FB_SZ:0);
+	if(next > end) return 0;
+	struct _hv_send_packet* p2 = 0;
+	if(sz){
+		p2 = _hv_alloc(sizeof(struct _hv_send_packet) + sz + (err_fb?20+sizeof(uintptr_t):0));
+		p2->first = hdr>>16; p2->kex = hdr>>17; p2->resent = 0; p2->len4 = sz>>2;
+		p2->has_err_fb = err_fb; p2->time_lo = 0; // Resend asap
+		p2->next = 0;
+		memcpy(p2->payload4, p+4, sz);
+		if(err_fb){
+			uint32_t* fb = p2->payload4 + p2->len4;
+			memcpy(fb, p+4+sz, 20);
+			uintptr_t errudata = (uintptr_t)_hv_read64(p+24+sz);
+			fb[5] = (uint32_t)errudata;
+#if UINTPTR_MAX > UINT32_MAX
+			fb[6] = (uint32_t)(errudata>>32);
+#endif
+		}
+	}
+	*out = p2;
+	return next;
+}
+
+// Skip over the slot and unsent pipe records of a send section. Returns 0 if it's truncated
+static inline uint8_t* _hv_skip_send_section(uint8_t* p, uint8_t* end, size_t wsz){
+	for(; wsz; wsz--){
+		if(p+4 > end) return 0;
+		uint32_t hdr = _hv_read32(p);
+		p += hdr == _HV_SAVE_UNSENT ? 4 : _hv_save_record_sz(hdr);
+	}
+	if(p+8 > end) return 0;
+	uint64_t pc = _hv_read64(p); p += 8;
+	for(; pc; pc--){
+		if(p+_HV_SAVE_PIPE_SZ > end) return 0;
+		uint64_t n = _hv_read64(p+40); p += _HV_SAVE_PIPE_SZ;
+		for(; n; n--){
+			if(p+4 > end) return 0;
+			p += _hv_save_record_sz(_hv_read32(p));
+		}
+	}
+	return p > end ? 0 : p;
+}
+
+// Restore unsent packets into their pipes. Their slots were reserved (as 0) while loading the slot records
+// Returns the end of the section, or 0 if it's truncated (what was read so far is still restored)
+static uint8_t* _hv_load_unsent(struct _hv_remote* state, uint8_t* p, uint8_t* end, bool bypass){
+	uint64_t pc = 0;
+	if(p+8 <= end) pc = _hv_read64(p), p += 8;
+	else p = 0;
+	const unsigned qshift = sizeof(size_t)*CHAR_BIT-2;
+	for(; p && pc; pc--){
+		if(p+_HV_SAVE_PIPE_SZ > end){ p = 0; break; }
+		uint8_t* h = p; p += _HV_SAVE_PIPE_SZ;
+		uint64_t n = _hv_read64(h+40);
+		struct _hv_send_packet *first = 0, **last = &first;
+		for(; n; n--){
+			struct _hv_send_packet* p2;
+			if(!(p = _hv_load_send_packet(p, end, &p2))) break;
+			if(!p2) continue;
+			size_t i = _hv_send_slot(state, p2, bypass);
+			uintptr_t cur = 1;
+			if(i < ring_buffer_size(&state->send_queue)) ring_buffer_get(&state->send_queue, i, &cur, sizeof(cur), true);
+			if(cur){
+				// Slot wasn't reserved for an unsent packet, corrupt
+				_hv_free(p2, _hv_packet_allocsz(p2));
+				continue;
+			}
+			// Tagged like hivemind_send does, so acks can tell them apart from send order links
+			cur = (uintptr_t)p2 | 2;
+			ring_buffer_set(&state->send_queue, i, &cur, sizeof(cur), true);
+			*last = p2; last = &p2->next;
+		}
+		if(!first) continue;
+		// Merge duplicate pipes (corrupt file) instead of adding them to the hash table twice
+		size_t usz = array_buffer_size(&state->pipes_with_unsent);
+		char* udata = array_buffer_data(&state->pipes_with_unsent);
+		struct _hv_send_pipe* ps = 0;
+		for(size_t i = 0; i < usz; i += sizeof(struct _hv_send_pipe))
+			if(!memcmp(((struct _hv_send_pipe*)(udata+i))->id, h, 20)){ ps = (struct _hv_send_pipe*)(udata+i); break; }
+		if(ps){
+			*ps->end = first;
+			ps->end = last;
+			continue;
+		}
+		// No placeholders exist yet and `end` never points into the array, so it's fine if this moves it
+		ps = array_buffer_push_garbage(&state->pipes_with_unsent, sizeof(struct _hv_send_pipe));
+		memcpy(ps->id, h, 20);
+		uint64_t q = _hv_read64(h+20);
+		ps->queued = (size_t)(q>>62)<<qshift | ((size_t)q & (((size_t)1<<qshift)-1));
+		ps->dependency_hi = _hv_read32(h+28);
+		ps->dependency_lo = _hv_read64(h+32);
+		ps->start = first;
+		ps->end = last;
+	}
+
+	// Build the hash table once, at the rank _hv_find_pipe_last would have grown it to
+	size_t usz = array_buffer_size(&state->pipes_with_unsent);
+	char* udata = array_buffer_data(&state->pipes_with_unsent);
+	unsigned rank = 0;
+	while(usz > sizeof(struct _hv_send_pipe)*2 << rank) rank++;
+	hash_table_set_rank(&state->pipes_with_unsent_b, rank);
+	for(size_t i = 0; i < usz; i += sizeof(struct _hv_send_pipe)){
+		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(udata+i);
+		uint64_t hash = _hv_send_pipe_hash(ps->id);
+		ps->next = hash_table_find(&state->pipes_with_unsent_b, hash);
+		hash_table_put(&state->pipes_with_unsent_b, hash, (void*)(i + sizeof(struct _hv_send_pipe)));
+	}
+	state->unsent_iter_i = 0;
+
+	// Reserved slots that never got their packet would block the queue from shifting forever. Mark them acked, then shift off leading acked slots
+	size_t rs = ring_buffer_size(&state->send_queue), lead = 0;
+	for(size_t i = 0; i < rs; i += sizeof(uintptr_t)){
+		uintptr_t cur;
+		ring_buffer_get(&state->send_queue, i, &cur, sizeof(cur), true);
+		if(!cur){
+			cur = 1;
+			ring_buffer_set(&state->send_queue, i, &cur, sizeof(cur), true);
+		}
+		if(cur == 1 && i == lead) lead += sizeof(uintptr_t);
+	}
+	if(lead) ring_buffer_shift_discard(&state->send_queue, lead, false);
+	return p;
 }
 
 static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hivemind_pipe_restore_fn_t pipe_restore){
@@ -64,10 +223,9 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 		ip_addr_t addr; memcpy(addr.bytes, p, 16);
 		uint32_t x = _hv_read32(p+16);
 		struct _hv_remote* state = _hv_state_find(s, addr, (uint16_t)x, _HV_FIND_CREATE);
-		bool bypass = state->bypass_type & 1;
 		p += 20;
 		bool r = x>>16&1, w = x>>17&1;
-		uint8_t* pw = p+64;
+		uint8_t* pw = p+r*64;
 		if(!state){
 			if(r){
 				if(p+64 > end) break;
@@ -84,12 +242,12 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			}
 			if(w){
 				if(pw+68 > end) break;
-				size_t wsz = _hv_read64(pw+52);
-				for(; wsz; wsz--)
-					p += _hv_read32(p)+4;
+				if(!r) p += 68;
+				if(!(p = _hv_skip_send_section(p, end, _hv_read64(pw+52)))) break;
 			}
 			continue;
 		}
+		bool bypass = state->bypass_type & 1;
 		if(r){
 			if(p+64 > end || atomic_load_explicit(&state->recv_last_used, memory_order_relaxed) > 1) break;
 			for(unsigned i = 0; i < 8; i++) state->recv_key[i] = _hv_read32(p+i*4);
@@ -148,21 +306,48 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			memcpy(&state->us_per_byte, &tmp, sizeof(tmp));
 			state->growth = -1.f;
 
-			size_t lo0 = state->send_seq_lo - wsz;
-			for(; wsz; wsz--){
-				unsigned sz = _hv_read32(p);
-				struct _hv_send_packet* p2 = 0;
-				if(sz){
-					bool asz = sz + (bypass?8:16);
-					p2 = _hv_alloc(sizeof(struct _hv_send_packet) + asz);
-					p2->first = sz>>16; p2->kex = sz>>17; p2->resent = 0; p2->len4 = asz>>2;
-					if(p2->first && bypass)
-						p2->len4--;
-					memcpy(p2->payload4+(bypass?2:4), p+4, sz);
+			if(!r) p += 68;
+			ring_buffer_reserve(&state->send_queue, wsz * sizeof(struct _hv_send_packet**));
+			for(; p && wsz; wsz--){
+				if(p+4 <= end && _hv_read32(p) == _HV_SAVE_UNSENT){
+					// Reserved, filled in by _hv_load_unsent
+					p += 4;
+					uintptr_t reserved = 0;
+					ring_buffer_push(&state->send_queue, &reserved, sizeof(reserved), true);
+					continue;
 				}
-				p += 4+sz;
-				lo0++;
-				ring_buffer_push(&state->send_queue, &p2, sizeof(struct _hv_send_packet*), true);
+				struct _hv_send_packet* p2;
+				if(!(p = _hv_load_send_packet(p, end, &p2))) break;
+				if(p2){
+					// Slot points at whatever links to this packet
+					ring_buffer_push(&state->send_queue, &state->send_order_end, sizeof(struct _hv_send_packet**), true);
+					p2->next = 0;
+					*state->send_order_end = p2;
+					state->send_order_end = &p2->next;
+				}else if(ring_buffer_size(&state->send_queue)){
+					// Hole. Leading holes are dropped since acks only shift them off when the slot before them is acked
+					uintptr_t acked = 1;
+					ring_buffer_push(&state->send_queue, &acked, sizeof(acked), true);
+				}
+			}
+			// A truncated slot list leaves slots missing at the end. Pad them out so the last slot is still send_seq_lo-1
+			for(; wsz; wsz--){
+				uintptr_t acked = 1;
+				ring_buffer_push(&state->send_queue, &acked, sizeof(acked), true);
+			}
+			if(p) p = _hv_load_unsent(state, p, end, bypass);
+			else _hv_load_unsent(state, end, end, bypass); // Still need the cleanup pass
+			if(!p) p = end; // Truncated, stop after this remote
+			if(ring_buffer_size(&state->send_queue)){
+				// Same as the first hivemind_send to a remote
+				state->rtt_gate_hi = 0;
+				state->rtt_gate_lo = 8;
+				// Queue for draining, otherwise nothing is (re)sent until the next hivemind_send to this remote
+				if(!state->undrained_next){
+					struct _hv_remote* n = atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed);
+					retry_undrained: state->undrained_next = n;
+					if(!atomic_compare_exchange_weak_explicit(&_hv_meta.undrained, &n, state, memory_order_acq_rel, memory_order_relaxed)) goto retry_undrained;
+				}
 			}
 		}
 		shared_lock_release(&s->state_lock);
@@ -307,24 +492,52 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					memcpy(chacha_in+4, state->send_key, 32);
 					ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, -1ull);
 					assert(it.remaining == wsz);
-					struct _hv_send_packet* p;
+					struct _hv_send_packet** pp;
 					size_t i = 0;
 					uint64_t lo0 = state->send_seq_lo; uint32_t hi = state->send_seq_hi;
 					uint64_t lo1 = lo0 - wsz/sizeof(struct _hv_send_packet*);
 					if(lo1>lo0) hi--;
-					while(ring_iterator_next(&it, &p, sizeof(struct _hv_send_packet*), true)){
-						if(!p){
+					while(ring_iterator_next(&it, &pp, sizeof(struct _hv_send_packet**), true)){
+						if((uintptr_t)pp & 2){
+							// Unsent, saved with its pipe below
+							_hv_write32(array_buffer_push_garbage(&b.buf, 4), _HV_SAVE_UNSENT);
+							continue;
+						}
+						// Acked or in flight (nothing can be in flight while we hold the lock)
+						if(!pp || ((uintptr_t)pp & 1)){
 							array_buffer_push_memset(&b.buf, 0, 4);
 							continue;
 						}
-						unsigned sz = (p->len4<<2) - (bypass ? 8 : 16);
-						if(bypass && p->first) sz += 4;
-						p = p->next;
-						if(!bypass) _hv_unencrypt_packet(chacha_in, hi, lo1, p);
-						uint8_t* p2 = array_buffer_push_garbage(&b.buf, sz+4);
-						_hv_write32(p2, sz | (uint32_t)(p->first<<16) | (uint32_t)(p->kex<<17)); // Upper 14 bits reserved
-						memcpy(p2+4, p->payload4+(bypass?2:4), sz);
+						_hv_save_send_packet(&b.buf, *pp);
 						i += sizeof(struct _hv_send_packet*);
+					}
+
+					// Unsent packets, by pipe
+					size_t usz = array_buffer_size(&state->pipes_with_unsent);
+					char* udata = array_buffer_data(&state->pipes_with_unsent);
+					_hv_write64(array_buffer_push_garbage(&b.buf, 8), usz / sizeof(struct _hv_send_pipe));
+					const unsigned qshift = sizeof(size_t)*CHAR_BIT-2;
+					for(size_t j = 0; j < usz; j += sizeof(struct _hv_send_pipe)){
+						struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(udata+j);
+						size_t h_i = array_buffer_size(&b.buf);
+						array_buffer_push_garbage(&b.buf, _HV_SAVE_PIPE_SZ);
+						uint64_t n = 0;
+						for(struct _hv_send_packet* p = ps->start; p;){
+							if((uintptr_t)p & 1){
+								// Placeholder. Can't exist while we hold the lock with no unlocked refs, but skip it anyway
+								p = ((struct _hv_send_packet_placeholder*)((uintptr_t)p-1))->next;
+								continue;
+							}
+							_hv_save_send_packet(&b.buf, p); n++;
+							p = p->next;
+						}
+						// Fetched after the pushes since they may have moved the buffer
+						uint8_t* h = (uint8_t*)array_buffer_data(&b.buf) + h_i;
+						memcpy(h, ps->id, 20);
+						_hv_write64(h+20, (uint64_t)(ps->queued>>qshift)<<62 | (uint64_t)(ps->queued & (((size_t)1<<qshift)-1)));
+						_hv_write32(h+28, ps->dependency_hi);
+						_hv_write64(h+32, ps->dependency_lo);
+						_hv_write64(h+40, n);
 					}
 				}
 			}

@@ -470,7 +470,12 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pip
 	struct _hv_send_pipe* pipe_state;
 	check:
 	if(!pos){
+		uintptr_t old_data = (uintptr_t)array_buffer_data(&state->pipes_with_unsent);
 		pipe_state = array_buffer_push_garbage(&state->pipes_with_unsent, sizeof(struct _hv_send_pipe));
+		if((uintptr_t)array_buffer_data(&state->pipes_with_unsent) != old_data){
+			pipe_state->start = 0; // Not initialized yet
+			_hv_unsent_fix_placeholders(state);
+		}
 		memcpy(pipe_state->id, pipe->id, 20);
 		pipe_state->start = 0;
 		pipe_state->end = &pipe_state->start;

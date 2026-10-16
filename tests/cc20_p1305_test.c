@@ -21,6 +21,7 @@ void hexdump(const void *data, size_t len) {
 	}
 }
 
+#define CHACHA20_POLY1305_IMPL
 #include <chacha20poly1305.h>
 #include <time.h>
 

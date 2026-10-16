@@ -125,9 +125,11 @@ struct _hv_remote{
 	// send_key is moved to the first cache line to save 1 cache line on the struct size
 	// It's infrequently written so this should be fine performance-wise
 	
-	// (Potentially hole-y) Ring buffer of send packets.
-	// `[0, unsent_i)` => Sent but unacked. These are in the send_order linked list. Each element is a pointer to &prev->next. This allows us to remove the packet from the linked list easily without making it a doubly linked list.
-	// `[unsent_i, end)` => Unsent packets (direct pointers, they are not in the linked list yet)
+	// (Potentially hole-y) Ring buffer of send packets, one slot per sequence number. Slot 0 is sequence `send_seq_lo - size`, so any index derived from the size must be recomputed after the lock is released and reacquired (acks shift acked slots off the front)
+	// `0` => Reserved, not in send_order (being built by hivemind_send, or currently being (re)sent with the lock released). Acks for these are ignored
+	// `1` => Already acked (a hole; leading holes are shifted off the front)
+	// `packet|2` => Queued in a pipe but not sent yet
+	// otherwise => In the send_order linked list. The element is a pointer to &prev->next (or &send_order_start). This allows us to remove the packet from the linked list easily without making it a doubly linked list.
 	ring_buffer_t send_queue;
 	// Rolling window for tracking how many packets can be sent how fast in us
 	uint64_t send_window;
@@ -136,7 +138,6 @@ struct _hv_remote{
 	// `send_order_end` is not a pointer to the last packet but to the last packet's next field (or a pointer to `send_order_start` if the list is empty). `*send_order_end` should always be `NULL`
 	struct _hv_send_packet *send_order_start, **send_order_end;
 
-	uint32_t packet_offset;
 	size_t unsent_iter_i;
 	hash_table_t pipes_with_unsent_b;
 	array_buffer_t pipes_with_unsent;
@@ -196,6 +197,55 @@ struct _hv_remote{
 // In that case, either reshuffle fields to keep it same size or increase this assert to the new size
 // Struct alignment >= CACHE_LINE so even a single poorly placed field can bump the size dramatically
 static_assert(sizeof(struct _hv_remote) <= 448, "sizeof(_hv_remote) changed");
+
+// Low 32 bits of the sequence number of send_queue's slot 0. Only valid until the send lock is released (or acks shift the queue)
+static inline uint32_t _hv_send_base(struct _hv_remote* state){
+	return (uint32_t)state->send_seq_lo - (uint32_t)(ring_buffer_size(&state->send_queue) / sizeof(struct _hv_send_packet**));
+}
+static inline size_t _hv_send_slot_b(struct _hv_send_packet* p, bool bypass, uint32_t base){
+	return (size_t)(uint32_t)(_hv_lseqof(p, bypass) - base) * sizeof(struct _hv_send_packet**);
+}
+// _hv_send_slot(state, p, bypass[, base]) -> byte index of a packet's slot in send_queue
+// Without `base` it is recomputed from state. The compiler can't do this for us: ring_buffer_set stores through a char* which may alias *state, so the size and send_seq_lo are reloaded after every set
+#define _HV_SEND_SLOT_SEL(_1, _2, _3, _4, f, ...) f
+#define _hv_send_slot(...) _HV_SEND_SLOT_SEL(__VA_ARGS__, _hv_send_slot4, _hv_send_slot3, _)(__VA_ARGS__)
+#define _hv_send_slot3(state, p, bypass) _hv_send_slot_b(p, bypass, _hv_send_base(state))
+#define _hv_send_slot4(state, p, bypass, base) _hv_send_slot_b(p, bypass, base)
+
+static inline uint64_t _hv_send_pipe_hash(const uint32_t id[5]){
+	return _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
+}
+
+// Remove the pipe at offset `off` (offset of the end of the element, as stored in the hash table) from its hash chain
+static void _hv_unsent_unlink(struct _hv_remote* state, struct _hv_send_pipe* ps, size_t off){
+	char* data = array_buffer_data(&state->pipes_with_unsent);
+	uint64_t hash = _hv_send_pipe_hash(ps->id);
+	size_t p = (size_t)hash_table_find(&state->pipes_with_unsent_b, hash);
+	if(p == off){
+		hash_table_put(&state->pipes_with_unsent_b, hash, ps->next);
+		return;
+	}
+	while(p){
+		struct _hv_send_pipe* p2 = (struct _hv_send_pipe*)(data + p) - 1;
+		if((size_t)p2->next == off){
+			p2->next = ps->next;
+			return;
+		}
+		p = (size_t)p2->next;
+	}
+	assert(0, "Pipe not found in its hash chain");
+}
+
+// Placeholders at the head of a pipe point back into pipes_with_unsent. Call after the array may have moved
+static void _hv_unsent_fix_placeholders(struct _hv_remote* state){
+	size_t sz = array_buffer_size(&state->pipes_with_unsent);
+	char* data = array_buffer_data(&state->pipes_with_unsent);
+	for(size_t i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
+		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data+i);
+		if((uintptr_t)ps->start & 1)
+			((struct _hv_send_packet_placeholder*)((uintptr_t)ps->start-1))->prevp = &ps->start;
+	}
+}
 
 struct _hv_pipe{
 	atomic uintptr_t next;
