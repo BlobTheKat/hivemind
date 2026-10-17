@@ -35,13 +35,15 @@ static bool _hv_pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], co
 	return true;
 }
 
-static bool _hv_fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t* data, size_t len, struct _hv_tls_packet_detach* d){
+// Find a pipe and acquire its slot, which fixes this message's position in the pipe's order
+// Returns 0 (nothing held) if the pipe doesn't exist or is closed. Otherwise pipes_lock is held shared along with the pipe's slot, and the result must be passed to _hv_fire_pipe_end. Any other locks may be released in between
+static void* _hv_pipe_acquire(hivemind_server_t* s, const uint32_t id[5]){
 	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
 	shared_lock_acquire(&s->pipes_lock);
 	uint32_t bexp = s->pipes_bucket_exp;
 	if(!bexp){
 		shared_lock_release(&s->pipes_lock);
-		return false;
+		return 0;
 	}
 	struct _hv_pipe* p = (struct _hv_pipe*) atomic_load_explicit(&s->pipes_data[hash&((1<<bexp)-1)], memory_order_acquire);
 	while(p){
@@ -49,13 +51,29 @@ static bool _hv_fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint
 			break;
 		p = (struct _hv_pipe*)(atomic_load_explicit(&p->next, memory_order_acquire)&-2ull);
 	}
-	if(p && lock_try_acquire(d->pipe_lock = &p->ref, 1)){
-		tls.packet_detach = d;
-		s->on_msg(s->udata, p->udata, data, len);
-		if(d->pipe_lock) lock_release(d->pipe_lock, 1);
+	if(!p) goto end;
+	lock_acquire(&p->ref, 1);
+	if((uintptr_t)p->next & 1){
+		lock_release(&p->ref, 1);
+		end:
+		shared_lock_release(&s->pipes_lock);
+		return 0;
 	}
+	return p;
+}
+// Invoke the handler on a pipe from _hv_pipe_acquire, then release its slot (unless the handler already did via hivemind_pipe_unlock) and pipes_lock
+static inline void _hv_fire_pipe_end(hivemind_server_t* s, void* pipe, const uint8_t* data, size_t len, struct _hv_tls_packet_detach* d){
+	struct _hv_pipe* p = (struct _hv_pipe*) pipe;
+	d->pipe_lock = &p->ref;
+	tls.packet_detach = d;
+	s->on_msg(s->udata, p->udata, data, len);
+	if(d->pipe_lock) lock_release(d->pipe_lock, 1);
 	shared_lock_release(&s->pipes_lock);
-	return true;
+}
+static inline bool _hv_fire_pipe(hivemind_server_t* s, const uint32_t id[5], const uint8_t* data, size_t len, struct _hv_tls_packet_detach* d){
+	void* p = _hv_pipe_acquire(s, id);
+	if(p) _hv_fire_pipe_end(s, p, data, len, d);
+	return !!p;
 }
 
 static void _hv_append_pipe(hivemind_server_t* s, uint32_t id[5], void* udata){
@@ -151,6 +169,7 @@ static void* _hv_kill_pipe(hivemind_server_t* s, const uint32_t id[5]){
 			}
 			lock_acquire(&p->ref, 1);
 			p->udata = 0;
+			lock_release(&p->ref, 1);
 			size_t deleted = atomic_fetch_add_explicit(&s->deleted_pipes, 1, memory_order_relaxed)+1;
 			if(b == 2 && deleted == 4){
 				// however this could be a deadlock hazard against a size increase
