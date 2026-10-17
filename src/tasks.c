@@ -1344,7 +1344,7 @@ static uint8_t* _hv_drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned 
 			len = x>>16; pipe_last = seq-(x&0xFFFF);
 			plen -= 4; header = 40;
 		}else if(header == 52){
-			len = (uint64_t)le32toh(*(uint32_t*)(packet+plen-4) ^ d[15])&0xFFFF|(uint64_t)le16toh(*(uint16_t*)(packet+plen-8) ^ d[14])<<16;
+			len = (uint64_t)(le32toh(*(uint32_t*)(packet+plen-4) ^ d[15])&0xFFFF)|(uint64_t)le16toh(*(uint16_t*)(packet+plen-8) ^ d[14])<<16;
 			pipe_last = le32toh(*(uint32_t*)(packet+plen-12) ^ d[13]);
 			plen -= 12; header = 40;
 		}else if(header != 20) continue;
