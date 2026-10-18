@@ -1,4 +1,6 @@
+#include "a.h"
 #include "internals.c"
+#include <stdatomic.h>
 #define CHACHA20_POLY1305_IMPL
 #include "chacha20poly1305.h"
 #define CRC64_IMPL
@@ -577,26 +579,34 @@ static inline void _hv_link_unsent_ack(struct _hv_remote* state){
 #define CHACHA20_INIT {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574} // "expand 32-byte k"
 
 static inline void _hv_finish(hivemind_server_t* s){
+
+	clear_pipes:
+	exclusive_lock_acquire(&s->pipes_lock);
 	size_t pipe_top = atomic_load_explicit(&s->pipes_heap_i, memory_order_relaxed);
 	size_t pipec = pipe_top - atomic_load_explicit(&s->deleted_pipes, memory_order_relaxed);
-
-	struct _hv_pipe* pheap = (struct _hv_pipe*)(s->pipes_data + ((1ull<<s->pipes_bucket_exp)&-2ull));
-	for(size_t i = 0; i < pipe_top; i++){
-		struct _hv_pipe* p = pheap+i;
-		if(atomic_load_explicit(&p->next, memory_order_relaxed)&1ull){
-			// deleted
-			pipec++;
-			continue;
-		}
-		if(s->finish_cb) s->finish_cb(s->udata, p->udata);
-	}
-	assert(pipec == pipe_top);
-	free(s->pipes_data);
+	unsigned pipes_bucket_exp = s->pipes_bucket_exp;
+	atomic(uintptr_t)* pipe_block = s->pipes_data;
 	atomic_init(&s->pipes_heap_i, 0);
 	atomic_init(&s->deleted_pipes, 0);
 	s->pipes_data = 0;
 	s->pipes_bucket_exp = 0;
-
+	exclusive_lock_release(&s->pipes_lock);
+	if(pipe_block){
+		struct _hv_pipe* pheap = (struct _hv_pipe*)(pipe_block + ((1ull<<pipes_bucket_exp)&-2ull));
+		for(size_t i = 0; i < pipe_top; i++){
+			struct _hv_pipe* p = pheap+i;
+			if(atomic_load_explicit(&p->next, memory_order_relaxed)&1ull){
+				// deleted
+				pipec++;
+				continue;
+			}
+			lock_acquire(&p->ref, 1);
+			if(s->finish_cb) s->finish_cb(s->udata, p->udata);
+		}
+		assert(pipec == pipe_top);
+		free(pipe_block);
+		goto clear_pipes; // there may be more pipes if any callbacks created some
+	}
 
 	size_t buckets = (1<<s->buckets_exp)>>1;
 	struct _hv_remote** r = s->remote_buckets;

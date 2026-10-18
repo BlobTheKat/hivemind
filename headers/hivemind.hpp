@@ -76,7 +76,6 @@ template<typename T_ = Self, typename P = void> struct Server: hivemind_server_t
 	using P = P;
 	using MsgFn = void (*)(T*, P*, const uint8_t*, size_t);
 	using GenericFn = void (*)(T*);
-	using PipeRestoreFn = P* (*)(T*, uint8_t*, size_t);
 	using PipeFinishFn = void (*)(T*, P*);
 
 	Server(const Server&) = delete;
@@ -102,12 +101,12 @@ template<typename T_ = Self, typename P = void> struct Server: hivemind_server_t
 		this->mtu_hi = mtu >> 8;
 	}
 	// Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
-	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN_V4, const char* filename = 0, PipeRestoreFn pipe_restore = 0){
-		return hivemind_start(this, where, reflect_test, filename, (hivemind_pipe_restore_fn_t) pipe_restore);
+	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN_V4){
+		return hivemind_start(this, where, reflect_test);
 	}
-	// Quit the server, optionally saving state to a file. The callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
-	void quit(GenericFn on_close = 0, const char* filename = 0, PipeFinishFn pipe_finish = 0){
-		hivemind_quit(this, (void(*)(void*))on_close, filename, (hivemind_pipe_finish_fn_t) pipe_finish);
+	// Quit the server. The callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
+	void quit(GenericFn on_close = 0, PipeFinishFn pipe_finish = 0){
+		hivemind_quit(this, (void(*)(void*))on_close, (hivemind_pipe_finish_fn_t) pipe_finish);
 	}
 	// Send a message to the given pipe. The message is guaranteed to be delivered as long as the pipe is not closed, and there is no network partition longer than the state cutoff, as defined by the receiver. Messages larger than the minimum MTU (minus overhead) will be fragmented (fragmentation primarily affects worst-case latency).
 	// The message will be copied, `msg` does not need to remain valid after this function returns. This function also performs all of the necessary encryption itself. If the current thread is important (e.g UI thread) and the message is large, you should probably defer this call to another thread

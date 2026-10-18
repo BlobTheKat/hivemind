@@ -47,7 +47,7 @@ int main(){
 	}
 	x_close(f);
 	hivemind_init(&ser, MASTER_KEY, (void(*)(void*, void*, const uint8_t*, size_t)) on_msg);
-	if(!hivemind_start(&ser, (remote_t){{0}, PORT, 0, 0}, ip_from_string("127.0.0.1"), NULL, NULL)){
+	if(!hivemind_start(&ser, (remote_t){{0}, PORT, 0, 0}, ip_from_string("127.0.0.1"))){
 		printf("\x1b[31mFailed to bind to :%d\x1b[m\n", PORT);
 		return 1;
 	}
@@ -69,6 +69,6 @@ int main(){
 
 	atomic_wait_until(&cnt, !cnt);
 	printf("\x1b[33mShutting down...\x1b[m\n");
-	hivemind_quit(&ser, on_done, 0, 0);
+	hivemind_quit(&ser, on_done, NULL);
 	atomic_wait_until(&cnt, cnt);
 }
