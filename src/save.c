@@ -200,7 +200,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 
 	uint64_t tim = epoch_now() / MILLISECOND_US;
 	uint32_t* id1 = (uint32_t*)(data+76);
-	uint64_t t1 = le32toh(id1[0])<<24 | (le32toh(id1[1])&0xFFFFFF);
+	uint64_t t1 = le32toh(id1[0])<<24 | (le32toh(id1[1])&0xffffff);
 	if(tim<t1) return false;
 	uint64_t hi = (uint64_t)le32toh(id1[1])>>24<<32 | (uint64_t)le32toh(id1[2]);
 	uint64_t lo = (uint64_t)le32toh(id1[3])<<32 | (uint64_t)le32toh(id1[4]);
@@ -232,7 +232,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				p += 64 + w*68;
 				for(; rsz; rsz--){
 					unsigned sz = _hv_read32(p);
-					if((sz-1) < 0xFFFE){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
+					if(sz < 0x10000){
 						p += 8+sz;
 					}else if(sz > 0x3ffff){
 						p += 44+_hv_read48(p+10);
@@ -257,10 +257,11 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			size_t rsz = _hv_read64(p+52);
 			state->key_derived_when = _hv_read64(p+60);
 			p += 64 + w*68;
-			for(; rsz; rsz--){
+			uint32_t seq = (uint32_t)state->recv_seq_lo;
+			for(; rsz; rsz--, seq++){
 				unsigned sz = _hv_read32(p);
 				uintptr_t p0;
-				if(sz < 0x10000){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
+				if(sz < 0x10000){
 					unsigned header = bypass ? 12 : 20;
 					uint8_t* p2 = _hv_alloc(sz + header) + header;
 					*(uint32_t*)(p2-4) = _hv_read32(p+4);
@@ -292,7 +293,6 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				ring_buffer_push(&state->recv_queue, &p0, sizeof(p0), true);
 			}
 		}
-		next:
 		if(w){
 			if(pw+68 > end || atomic_load_explicit(&state->send_last_used, memory_order_relaxed) > 1) break;
 			for(unsigned i = 0; i < 8; i++) state->send_key[i] = _hv_read32(pw+i*4);
@@ -308,7 +308,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 			state->growth = -1.f;
 
 			if(!r) p += 68;
-			ring_buffer_reserve(&state->send_queue, wsz * sizeof(struct _hv_send_packet**));
+			ring_buffer_reserve(&state->send_queue, wsz * sizeof(struct _hv_send_packet*));
 			for(; p && wsz; wsz--){
 				if(p+4 <= end && _hv_read32(p) == _HV_SAVE_UNSENT){
 					// Reserved, filled in by _hv_load_unsent
@@ -321,7 +321,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				if(!(p = _hv_load_send_packet(p, end, &p2))) break;
 				if(p2){
 					// Slot points at whatever links to this packet
-					ring_buffer_push(&state->send_queue, &state->send_order_end, sizeof(struct _hv_send_packet**), true);
+					ring_buffer_push(&state->send_queue, &state->send_order_end, sizeof(struct _hv_send_packet*), true);
 					p2->next = 0;
 					*state->send_order_end = p2;
 					state->send_order_end = &p2->next;
@@ -363,7 +363,7 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 }
 
 static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,void*), const char* save){
-	struct _hv_tls_buf_being_built b;
+	struct _hv_tls_buf_being_built b = {};
 	size_t pipe_top = atomic_load_explicit(&s->pipes_heap_i, memory_order_relaxed);
 	size_t pipec = pipe_top - atomic_load_explicit(&s->deleted_pipes, memory_order_relaxed);
 	if(save){
@@ -457,12 +457,14 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					_hv_write32(head+64, tmp);
 				}
 				if(r){
-					ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, -1ull);
+					ring_iterator_t it = ring_buffer_iterator(&state->recv_queue, 0, SIZE_MAX);
 					assert(it.remaining == rsz);
 					uintptr_t cur;
-					while(ring_iterator_next(&it, &cur, sizeof(cur), true)){
+					uint32_t seq = (uint32_t)state->recv_seq_lo;
+					for(; ring_iterator_next(&it, &cur, sizeof(cur), true); seq++){
 						uint8_t* buf2;
 						if(cur < 3){
+							// Unconfirmed errors also save their reason
 							_hv_write32(array_buffer_push_garbage(&b.buf, 4), 0x10000|cur);
 						}else if(!(cur&3)){
 							struct _hv_packet_reassembly* block = (struct _hv_packet_reassembly*)cur;
@@ -489,16 +491,16 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					}
 				}
 				if(w){
-					uint32_t chacha_in[16] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
+					uint32_t chacha_in[16] = CHACHA20_INIT;
 					memcpy(chacha_in+4, state->send_key, 32);
-					ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, -1ull);
+					ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, SIZE_MAX);
 					assert(it.remaining == wsz);
 					struct _hv_send_packet** pp;
 					size_t i = 0;
 					uint64_t lo0 = state->send_seq_lo; uint32_t hi = state->send_seq_hi;
 					uint64_t lo1 = lo0 - wsz/sizeof(struct _hv_send_packet*);
 					if(lo1>lo0) hi--;
-					while(ring_iterator_next(&it, &pp, sizeof(struct _hv_send_packet**), true)){
+					while(ring_iterator_next(&it, &pp, sizeof(struct _hv_send_packet*), true)){
 						if((uintptr_t)pp & 2){
 							// Unsent, saved with its pipe below
 							_hv_write32(array_buffer_push_garbage(&b.buf, 4), _HV_SAVE_UNSENT);

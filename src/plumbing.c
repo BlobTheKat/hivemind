@@ -15,9 +15,9 @@ struct _hv_tls_packet_detach{
 };
 thread_local union{ struct _hv_tls_packet_detach* packet_detach; struct _hv_tls_buf_being_built* buf_being_built; } tls;
 static bool _hv_pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], const uint32_t b1[5]){
-	uint64_t tn = (uint64_t)le32toh(test[0])<<24|((uint64_t)le32toh(test[1])&0xFFFFFF);
-	uint64_t t0 = (uint64_t)le32toh(b0[0])<<24|((uint64_t)le32toh(b0[1])&0xFFFFFF);
-	uint64_t t1 = (uint64_t)le32toh(b1[0])<<24|((uint64_t)le32toh(b1[1])&0xFFFFFF);
+	uint64_t tn = (uint64_t)le32toh(test[0])<<24|((uint64_t)le32toh(test[1])&0xffffff);
+	uint64_t t0 = (uint64_t)le32toh(b0[0])<<24|((uint64_t)le32toh(b0[1])&0xffffff);
+	uint64_t t1 = (uint64_t)le32toh(b1[0])<<24|((uint64_t)le32toh(b1[1])&0xffffff);
 	if(tn < t0 || tn > t1) return false;
 	uint64_t hin = (uint64_t)(le32toh(test[1])>>24)<<32 | (uint64_t)le32toh(test[2]);
 	uint64_t hi0 = (uint64_t)(le32toh(b0[1])>>24)<<32 | (uint64_t)le32toh(b0[2]);
@@ -38,7 +38,7 @@ static bool _hv_pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], co
 // Find a pipe and acquire its slot, which fixes this message's position in the pipe's order
 // Returns 0 (nothing held) if the pipe doesn't exist or is closed. Otherwise pipes_lock is held shared along with the pipe's slot, and the result must be passed to _hv_fire_pipe_end. Any other locks may be released in between
 static void* _hv_pipe_acquire(hivemind_server_t* s, const uint32_t id[5]){
-	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
+	uint64_t hash = _hv_send_pipe_hash(id);
 	shared_lock_acquire(&s->pipes_lock);
 	uint32_t bexp = s->pipes_bucket_exp;
 	if(!bexp){
@@ -95,20 +95,20 @@ static void _hv_append_pipe(hivemind_server_t* s, uint32_t id[5], void* udata){
 		}
 		excl = true;
 		if(!b){
-			s->pipes_data = (atomic(uintptr_t)*) _hv_alloc(sizeof(atomic(uintptr_t))*2 + sizeof(struct _hv_pipe)*4);
+			s->pipes_data = (atomic(uintptr_t)*)_hv_alloc(sizeof(atomic(uintptr_t))*2 + sizeof(struct _hv_pipe)*4);
 			atomic_init(&s->pipes_data[0], 0);
 			atomic_init(&s->pipes_data[1], 0);
 			b = 2;
 		}else{
 			b <<= 1;
-			uintptr_t* data2 = (uintptr_t*) _hv_alloc((sizeof(atomic(uintptr_t)) + sizeof(struct _hv_pipe)*2) * b);
+			uintptr_t* data2 = (uintptr_t*)_hv_alloc((sizeof(atomic(uintptr_t)) + sizeof(struct _hv_pipe)*2) * b);
 			struct _hv_pipe* oh = (struct _hv_pipe*)(s->pipes_data+ob);
 			struct _hv_pipe* nh = (struct _hv_pipe*)(data2+b);
 			memset(data2, 0, sizeof(struct _hv_pipe*)*b);
 			size_t j = 0;
 			for(size_t i = 0; i < ob; i++){
 				if(atomic_load_explicit(&oh[i].next, memory_order_relaxed)&1) continue;
-				uint64_t hash = _hv_mix64((uint64_t)oh[i].id[1]<<32|oh[i].id[4])^_hv_mix64((uint64_t)oh[i].id[2]<<32|oh[i].id[3]);
+				uint64_t hash = _hv_send_pipe_hash(oh[i].id);
 				nh[j].next = data2[hash&(b-1)];
 				memcpy(nh[j].id, oh[i].id, 20);
 				nh[j].udata = oh[i].udata;
@@ -123,7 +123,7 @@ static void _hv_append_pipe(hivemind_server_t* s, uint32_t id[5], void* udata){
 		s->pipes_bucket_exp++;
 	}
 	if(excl) exclusive_lock_downgrade(&s->pipes_lock);
-	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
+	uint64_t hash = _hv_send_pipe_hash(id);
 	struct _hv_pipe* p = (struct _hv_pipe*)(s->pipes_data+b) + i;
 
 	p->next = atomic_load_explicit(&s->pipes_data[hash&(b-1)], memory_order_relaxed);
@@ -135,7 +135,7 @@ static void _hv_append_pipe(hivemind_server_t* s, uint32_t id[5], void* udata){
 }
 
 static void* _hv_kill_pipe(hivemind_server_t* s, const uint32_t id[5]){
-	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
+	uint64_t hash = _hv_send_pipe_hash(id);
 	shared_lock_acquire(&s->pipes_lock);
 	size_t b = (1<<s->pipes_bucket_exp)&-2ull; // 1 => 0
 	void* d = 0;
@@ -188,14 +188,14 @@ static void* _hv_kill_pipe(hivemind_server_t* s, const uint32_t id[5]){
 					goto end;
 				}
 				size_t ob = b; b >>= 1;
-				uintptr_t* data2 = (uintptr_t*) _hv_alloc((sizeof(atomic(uintptr_t)) + sizeof(struct _hv_pipe)*2) * b);
+				uintptr_t* data2 = (uintptr_t*)_hv_alloc((sizeof(atomic(uintptr_t)) + sizeof(struct _hv_pipe)*2) * b);
 				struct _hv_pipe* oh = (struct _hv_pipe*)(s->pipes_data+ob);
 				struct _hv_pipe* nh = (struct _hv_pipe*)(data2+b);
 				memset(data2, 0, sizeof(struct _hv_pipe*)*b);
 				size_t j = 0;
 				for(size_t i = 0; i < ob; i++){
 					if(atomic_load_explicit(&oh[i].next, memory_order_relaxed)&1) continue;
-					uint64_t hash = _hv_mix64((uint64_t)oh[i].id[1]<<32|oh[i].id[4])^_hv_mix64((uint64_t)oh[i].id[2]<<32|oh[i].id[3]);
+					uint64_t hash = _hv_send_pipe_hash(oh[i].id);
 					nh[j].next = data2[hash&(b-1)];
 					memcpy(nh[j].id, oh[i].id, 20);
 					nh[j].udata = oh[i].udata;
@@ -241,10 +241,10 @@ static inline uint64_t _hv_keyless_sig2(hivemind_server_t* s, const remote_t* fr
 	ChaCha20_block(chacha);
 	memcpy(out_tag, chacha, 32);
 	if(out_xor) for(unsigned i = 0; i < xor_count; i++) out_xor[i] ^= chacha[i+8];
-	return (uint64_t)le32toh(knonce[0])<<24|(uint64_t)(le32toh(knonce[1])&0xFFFFFF);
+	return (uint64_t)le32toh(knonce[0])<<24|(uint64_t)(le32toh(knonce[1])&0xffffff);
 }
 
-static void _hv_ram_packed_kex(hivemind_server_t* s, const uint32_t pipeid[static restrict 5], struct _hv_remote* state, uint32_t out_packet[static restrict 5]){
+static void _hv_ram_packed_kex(hivemind_server_t* s, struct _hv_remote* state, uint32_t out_packet[static restrict 5]){
 	remote_t to = {.addr = state->addr, .port = state->port};
 	_hv_keyless_sig(s, &to, out_packet, state->send_key, 0, 0);
 }
@@ -333,7 +333,7 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 		goto init;
 	}
 	// For just one bucket (up to 4 remotes) save an allocation
-	if(buckets > 1){ p = state[hash&(buckets-1)]; }
+	if(buckets > 1) p = state[hash&(buckets-1)];
 	else p = (struct _hv_remote*) state;
 	while(p){
 		if(!memcmp(&p->addr, &addr, 16) && p->port == port){
@@ -354,7 +354,7 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 
 	if((s->remote_count++) == (buckets<<1)){
 		size_t bytes = sizeof(struct _hv_remote*) * (buckets<<1);
-		struct _hv_remote** state2 = (struct _hv_remote**) _hv_alloc(bytes);
+		struct _hv_remote** state2 = (struct _hv_remote**)_hv_alloc(bytes);
 		s->buckets_exp++;
 		memset(state2, 0, bytes);
 		if(buckets > 1){
@@ -368,15 +368,14 @@ static struct _hv_remote* _hv_state_find(hivemind_server_t* s, ip_addr_t addr, u
 	// For just one bucket (up to 4 remotes) save an allocation
 	struct _hv_remote** onext = buckets > 1 ? &state[hash&(buckets-1)] : (struct _hv_remote**) &s->remote_buckets, *next = *onext;
 	if(use_vq){
-		p = (struct _hv_remote*) _hv_alloc(sizeof(struct _hv_remote_vq));
+		p = (struct _hv_remote*)_hv_alloc(sizeof(struct _hv_remote_vq));
 		struct _hv_remote_vq* p_vq = (struct _hv_remote_vq*) p;
 		memset(p_vq, 0, sizeof(*p_vq));
-		const char set[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
 		char name[56]; _hv_vq_name(name, addr, port);
 		p_vq->bypass_type = 2 + vqueue_open(&p_vq->q, name, sizeof(name));
 		p_vq->prevp = onext;
 	}else{
-		p = (struct _hv_remote*) _hv_alloc_a(_HV_REMOTE_SIZE, alignof(struct _hv_remote));
+		p = (struct _hv_remote*)_hv_alloc_a(_HV_REMOTE_SIZE, alignof(struct _hv_remote));
 		memset(p, 0, sizeof(*p));
 		p->server_mtu = le16toh(s->mtu_le)>>2;
 		p->bypass_type = _hv_addr_compare(&addr, port, &s->addr, le16toh(s->port_le), s->encryption_bypass_prefix_v4, s->encryption_bypass_prefix_v6);
@@ -416,7 +415,7 @@ static void _hv_encrypt_packet(uint32_t chacha[16], struct _hv_send_packet* p){
 	// RFC 7539 § 2.3-2.4 recommends using in[12] ==0 for AEAD, >0 for payload, and in[13-15] for nonce
 	// One slight change is we use in[12] ==2^32-1 for AEAD and 0..<2^32-1 for payload. This is a stylistic choice
 	// and has no effect on the quality of the resulting keystream. Individual UDP packets will never be able to surpass block counter > 1024
-	d[12] = 0xFFFFFFFF;
+	d[12] = 0xffffffff;
 	ChaCha20_block(d);
 
 	if(p->first){
@@ -456,9 +455,9 @@ static inline void _hv_crcinitless_packet_finish(hivemind_server_t* s, const rem
 	soft_assert(send_success);
 }
 
-void _hv_add_to_send_pipe(struct _hv_remote* state, const uint32_t id[5], struct _hv_send_packet* nfirst, struct _hv_send_packet** nlast, size_t dwords, struct _hv_send_packet_placeholder* plch){
-	uint64_t hash = _hv_mix64((uint64_t)id[1]<<32|id[4])^_hv_mix64((uint64_t)id[2]<<32|id[3]);
-	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
+void _hv_add_to_send_pipe(struct _hv_remote* state, const uint32_t id[restrict 5], struct _hv_send_packet* nfirst, struct _hv_send_packet** nlast, size_t dwords, struct _hv_send_packet_placeholder* plch){
+	uint64_t hash = _hv_send_pipe_hash(id);
+	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash);
 	struct _hv_send_pipe* pipe_state;
 	check:
 	assert(pos);
@@ -485,8 +484,8 @@ void _hv_add_to_send_pipe(struct _hv_remote* state, const uint32_t id[5], struct
 		}
 	}else state->unsent_iter_i = sizeof(struct _hv_send_pipe);
 }
-uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pipe, uint32_t self, struct _hv_send_packet_placeholder* plch){
-	uint64_t hash = _hv_mix64((uint64_t)pipe->id[1]<<32|pipe->id[4])^_hv_mix64((uint64_t)pipe->id[2]<<32|pipe->id[3]);
+uint32_t _hv_find_pipe_last(struct _hv_remote* state, const uint32_t pipeid[restrict 5], unsigned qos, uint32_t self, struct _hv_send_packet_placeholder* plch){
+	uint64_t hash = _hv_send_pipe_hash(pipeid);
 	void *pos = hash_table_find(&state->pipes_with_unsent_b, hash), *pos0 = pos;
 	struct _hv_send_pipe* pipe_state;
 	check:
@@ -497,12 +496,12 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pip
 			pipe_state->start = 0; // Not initialized yet
 			_hv_unsent_fix_placeholders(state);
 		}
-		memcpy(pipe_state->id, pipe->id, 20);
+		memcpy(pipe_state->id, pipeid, 20);
 		pipe_state->start = 0;
 		pipe_state->end = &pipe_state->start;
-		pipe_state->dependency_lo = 0xFFFFFFFF00000000;
-		pipe_state->dependency_hi = 0xFFFFFFFF;
-		pipe_state->queued = (size_t)le16toh(pipe->mtu_le) << (sizeof(size_t)*CHAR_BIT-2);
+		pipe_state->dependency_lo = 0xffffffff00000000;
+		pipe_state->dependency_hi = 0xffffffff;
+		pipe_state->queued = (size_t)qos << (sizeof(size_t)*CHAR_BIT-2);
 		unsigned cur_rank = hash_table_rank(&state->pipes_with_unsent_b);
 		size_t sz = array_buffer_size(&state->pipes_with_unsent);
 		if(sz > sizeof(struct _hv_send_pipe)*2 << cur_rank){
@@ -511,7 +510,7 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pip
 			hash_table_set_rank(&state->pipes_with_unsent_b, ++cur_rank);
 			for(unsigned i = 0; i < sz; i += sizeof(struct _hv_send_pipe)){
 				struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data+i);
-				uint64_t hash2 = _hv_mix64((uint64_t)ps->id[1]<<32|ps->id[4])^_hv_mix64((uint64_t)ps->id[2]<<32|ps->id[3]);
+				uint64_t hash2 = _hv_send_pipe_hash(ps->id);
 				ps->next = hash_table_find(&state->pipes_with_unsent_b, hash2);
 				hash_table_put(&state->pipes_with_unsent_b, hash2, (void*)(i + sizeof(struct _hv_send_pipe)));
 			}
@@ -521,7 +520,7 @@ uint32_t _hv_find_pipe_last(struct _hv_remote* state, const hivemind_pipe_t* pip
 		hash_table_put(&state->pipes_with_unsent_b, hash, (void*)array_buffer_size(&state->pipes_with_unsent));
 	}else{
 		pipe_state = (struct _hv_send_pipe*)(array_buffer_data(&state->pipes_with_unsent) + (size_t)pos) - 1;
-		if(memcmp(pipe->id, pipe_state->id, 20)){
+		if(memcmp(pipeid, pipe_state->id, 20)){
 			pos = pipe_state->next;
 			goto check;
 		}
@@ -569,3 +568,14 @@ struct{
 	.unsent_ack = (struct _hv_remote*)1
 };
 static_assert(alignof(thread_t) <= alignof(max_align_t));
+
+// Make sure the remote is visited by the ack tick (expects the recv lock held)
+static inline void _hv_link_unsent_ack(struct _hv_remote* state){
+	if(state->unsent_ack_next) return;
+	struct _hv_remote* n = atomic_load_explicit(&_hv_meta.unsent_ack, memory_order_acquire);
+	retry: state->unsent_ack_next = n;
+	if(!atomic_compare_exchange_weak_explicit(&_hv_meta.unsent_ack, &n, state, memory_order_acq_rel, memory_order_relaxed)) goto retry;
+	x_event_queue_wake(&_hv_meta.queue, _HV_SEND_TICK);
+}
+
+#define CHACHA20_INIT {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574} // "expand 32-byte k"

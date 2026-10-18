@@ -22,7 +22,7 @@ static_assert(CHAR_BIT == 8);
 static inline void* _hv_alloc(size_t bytes){
 	void* addr = malloc(bytes);
 	if unlikely(!addr){
-		fputs("_hv_alloc(): Heap out of memory", stderr);
+		fputs("hivemind: _hv_alloc(): Heap out of memory\n", stderr);
 		abort();
 	}
 	assert(!((uintptr_t)addr&7)); // Aligned
@@ -31,7 +31,7 @@ static inline void* _hv_alloc(size_t bytes){
 static inline void* _hv_alloc_a(size_t bytes, size_t to){
 	void* addr = aligned_alloc(to, bytes);
 	if unlikely(!addr){
-		fputs("_hv_alloc(): Heap out of memory", stderr);
+		fputs("hivemind: _hv_alloc(): Heap out of memory\n", stderr);
 		abort();
 	}
 	return addr;
@@ -95,6 +95,15 @@ struct _hv_send_pipe{
 	struct _hv_send_packet *start, **end; // start can be tagged
 };
 
+// Errors (slot value 2 in recv_queue) sent back with ack_err that the sender hasn't confirmed with ack_err_ack yet
+struct _hv_ack_err{ uint32_t seq, reason; };
+struct _hv_ack_err_q{
+	uint32_t n, cap;
+	// Resend backoff: resent every 4<<gen ticks
+	uint16_t tick; uint8_t gen;
+	struct _hv_ack_err ent[];
+};
+
 struct _hv_remote{
 	// Field order is specific and to avoid an entire cache line of wasted padding and reduce false sharing
 	// This layout is optimized for 64 bit pointers and size_t.
@@ -116,7 +125,7 @@ struct _hv_remote{
 	// == 2-4th cache line: frequently written by send/drain logic ==
 	// Timestamp when last packet was sent. Also used as a lock and init flag (1 = uninit, 0 = locked)
 	// See _hv_time_lock_acq/_hv_time_lock_rel
-	alignas(CACHE_LINE) atomic uint64_t send_last_used;
+	alignas(CACHE_LINE) atomic(uint64_t) send_last_used;
 	// While unmasking a packet, or performing another expensive operation, it is not beneficial to unnecessarily hold on to the send_last_used lock. We temporarily release that lock, incrementing this value to make sure the remote is not GC'd in between. Since this value is only touched inside the lock, it does not need to be atomic
 	uint32_t send_unlocked_ref;
 	uint32_t send_seq_hi; uint64_t send_seq_lo; // Protocol sequence numbers
@@ -163,7 +172,7 @@ struct _hv_remote{
 
 	// == 5th-7th cache line: frequently written by recv logic ==
 	// See send_last_used
-	alignas(CACHE_LINE) atomic uint64_t recv_last_used;
+	alignas(CACHE_LINE) atomic(uint64_t) recv_last_used;
 	uint32_t recv_unlocked_ref; // See send_unlocked_ref
 	uint32_t recv_seq_hi; uint64_t recv_seq_lo; // Protocol sequence numbers
 	// Ring buffer of out-of-order-packets
@@ -200,10 +209,10 @@ static_assert(sizeof(struct _hv_remote) <= 448, "sizeof(_hv_remote) changed");
 
 // Low 32 bits of the sequence number of send_queue's slot 0. Only valid until the send lock is released (or acks shift the queue)
 static inline uint32_t _hv_send_base(struct _hv_remote* state){
-	return (uint32_t)state->send_seq_lo - (uint32_t)(ring_buffer_size(&state->send_queue) / sizeof(struct _hv_send_packet**));
+	return (uint32_t)state->send_seq_lo - (uint32_t)(ring_buffer_size(&state->send_queue) / sizeof(struct _hv_send_packet*));
 }
 static inline size_t _hv_send_slot_b(struct _hv_send_packet* p, bool bypass, uint32_t base){
-	return (size_t)(uint32_t)(_hv_lseqof(p, bypass) - base) * sizeof(struct _hv_send_packet**);
+	return (size_t)(uint32_t)(_hv_lseqof(p, bypass) - base) * sizeof(struct _hv_send_packet*);
 }
 // _hv_send_slot(state, p, bypass[, base]) -> byte index of a packet's slot in send_queue
 // Without `base` it is recomputed from state. The compiler can't do this for us: ring_buffer_set stores through a char* which may alias *state, so the size and send_seq_lo are reloaded after every set
@@ -248,7 +257,7 @@ static void _hv_unsent_fix_placeholders(struct _hv_remote* state){
 }
 
 struct _hv_pipe{
-	atomic uintptr_t next;
+	atomic(uintptr_t) next;
 	uint32_t id[5]; lock_t ref;
 	void* udata;
 };
@@ -266,7 +275,7 @@ struct _hv_open_close_data{
 };
 
 struct _hv_vq{
-	_Atomic size_t ref;
+	atomic(size_t) ref;
 	vqueue_t q;
 };
 
@@ -285,7 +294,7 @@ struct hivemind_server{
 	uint32_t master_key[8];
 #ifdef __SIZEOF_INT128__
 	union{
-		atomic uint128_t _id;
+		atomic(uint128_t) _id;
 		char _rand_bytes[16];
 	};
 #else
@@ -296,7 +305,7 @@ struct hivemind_server{
 	atomic_flag _id_lock;
 #endif
 	uint8_t buckets_exp, pipes_bucket_exp;
-	_Atomic uint8_t vq_flag;
+	atomic(uint8_t) vq_flag;
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
 	struct _hv_remote** remote_buckets;
@@ -316,22 +325,21 @@ static_assert(sizeof(hivemind_server_t) == 256);
 #ifdef __SIZEOF_INT128__
 static void _hv_alloc_id(hivemind_server_t* s, uint32_t out[5], uint64_t t){
 	uint128_t v = atomic_fetch_add_explicit(&s->_id, 1, memory_order_relaxed);
-	out[0] = htole32(t>>24); out[1] = htole32(t&0xFFFFFF|v>>96<<24);
+	out[0] = htole32(t>>24); out[1] = htole32(t&0xffffff|v>>96<<24);
 	out[2] = htole32(v>>64); out[3] = htole32(v>>32);
 	out[4] = htole32(v);
 }
 static void _hv_nalloc_id(hivemind_server_t* s, uint32_t out[5]){
 	uint64_t t = epoch_now()/MILLISECOND_US;
 	uint128_t v = atomic_load_explicit(&s->_id, memory_order_relaxed);
-	out[0] = htole32(t>>24); out[1] = htole32(t&0xFFFFFF|v>>96<<24);
+	out[0] = htole32(t>>24); out[1] = htole32(t&0xffffff|v>>96<<24);
 	out[2] = htole32(v>>64); out[3] = htole32(v>>32);
 	out[4] = htole32(v);
 }
 static inline uint64_t _hv_alloc_id_short(hivemind_server_t* s){
 	uint64_t t = epoch_now()/MILLISECOND_US;
-	uint8_t spin = 32;
 	uint64_t lo = (uint64_t)atomic_fetch_add_explicit(&s->_id, 1, memory_order_relaxed);
-	return t<<8|(lo&0xFF);
+	return t<<8|(lo&0xff);
 }
 #else
 #warning No 16-byte atomic primitive detected. If they are available, consider compiling with appropriate flags, e.g -mcx16. Falling back to lock-based approach
@@ -360,7 +368,7 @@ static inline uint64_t _hv_alloc_id_short(hivemind_server_t* s){
 	while(atomic_flag_test_and_set_explicit(&s->_id_lock, memory_order_acquire)) if(spin) spin--, thread_relax(); else thread_yield();
 	uint64_t lo = s->_id_lo++; if(lo == -1ull) s->_id_hi++;
 	atomic_flag_clear_explicit(&s->_id_lock, memory_order_release);
-	return t<<8|(lo&0xFF);
+	return t<<8|(lo&0xff);
 }
 #endif
 
@@ -401,7 +409,7 @@ static void _hv_time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
 	_hv_time_lock_rel(ptr, l);
 	thread_yield();
 	_hv_time_lock_acq(ptr);
-	if(*ref & 0x7FFFFFFF) goto retry;
+	if(*ref & 0x7fffffff) goto retry;
 	*ref = 0;
 }
 
@@ -411,8 +419,8 @@ static void _hv_time_lock_acq_excl(atomic(uint64_t)* ptr, uint32_t* ref){
 // Resolve a 96-bit sequence number from the low 32 bits and a reference sequence number
 // The returned sequence number is within +/- 2^31 of the reference sequence number
 static inline void _hv_resolve_seq(uint64_t* lo, uint32_t* hi, uint32_t seq){
-	uint64_t lo1 = *lo, lo2 = (lo1 & 0xFFFFFFFF00000000) | seq;
-	*lo = lo2 + ((lo2-lo1+(0x80000000))&0xFFFFFFFF00000000);
+	uint64_t lo1 = *lo, lo2 = (lo1 & 0xffffffff00000000) | seq;
+	*lo = lo2 + ((lo2-lo1+(0x80000000))&0xffffffff00000000);
 	*hi += (lo2>>32)-(lo1>>32);
 }
 
@@ -432,7 +440,7 @@ static inline void _hv_remote_cleanup_recv(struct _hv_remote* state, bool bypass
 		else if((ptr&3)==2) free((uint8_t*)(ptr - 2 - (bypass ? 12 : 20)));
 	}
 	ring_buffer_destroy(&state->recv_queue);
-	memset(&state->recv_queue, 0, sizeof(ring_buffer_t));
+	state->recv_queue = (ring_buffer_t){};
 }
 
 static void _hv_remote_cleanup_send(struct _hv_remote* state){
@@ -444,7 +452,7 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	state->send_order_start = 0; state->send_order_end = &state->send_order_start;
 	state->send_window = 0;
 	ring_buffer_destroy(&state->send_queue);
-	memset(&state->send_queue, 0, sizeof(ring_buffer_t));
+	state->send_queue = (ring_buffer_t){};
 
 	size_t sz = array_buffer_size(&state->pipes_with_unsent);
 	char* unsent_data = array_buffer_data(&state->pipes_with_unsent);

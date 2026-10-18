@@ -199,7 +199,7 @@ static enum ip_kind ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
 static uint32_t interface_from_str(const char* interface_name);
 
 // Create a new UDP socket which will automatically select a port/address/interface as needed, ideal for clients
-static x_socket_t x_udp_auto();
+static x_socket_t x_udp_auto(void);
 
 // Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the MTU for that path. The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
 static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from);
@@ -275,8 +275,8 @@ static size_t x_read(x_file_t fd, void* buf, uint64_t start, size_t count){
 	overlapped.Offset = (DWORD) start;
 	overlapped.OffsetHigh = (DWORD) (start >> 32);
 	char* _buf = (char*) buf;
-	#if SIZE_MAX > 0xFFFFFFFF
-	if(count > 0xFFFFFFFF){
+	#if SIZE_MAX > 0xffffffff
+	if(count > 0xffffffff){
 		// Do not "fix" what you do not understand
 		// Ignorance sees bad code, but fast code is not for the ignorant
 		// Learn the -O3 way and you will appreciate the beauty and fragility
@@ -289,7 +289,7 @@ static size_t x_read(x_file_t fd, void* buf, uint64_t start, size_t count){
 			size_t b = _buf-(char*)buf;
 			overlapped.Offset = b;
 			overlapped.OffsetHigh = b>>32;
-		}while(count > 0xFFFFFFFF);
+		}while(count > 0xffffffff);
 		return (_buf-(char*)buf) + (ReadFile(fd, _buf, (DWORD) count, &bytesRead, &overlapped) ? bytesRead : 0);
 	}
 	#endif
@@ -302,8 +302,8 @@ static size_t x_write(x_file_t fd, const void* buf, uint64_t start, size_t count
 	overlapped.Offset = (DWORD) start;
 	overlapped.OffsetHigh = (DWORD) (start >> 32);
 	const char* _buf = (const char*) buf;
-	#if SIZE_MAX > 0xFFFFFFFF
-	if(count > 0xFFFFFFFF){
+	#if SIZE_MAX > 0xffffffff
+	if(count > 0xffffffff){
 		// See the comment in the x_read() implementation
 		do{
 			DWORD tot = WriteFile(fd, _buf, 0xFFFFF000, &bytesWritten, &overlapped) ? bytesWritten : 0;
@@ -313,7 +313,7 @@ static size_t x_write(x_file_t fd, const void* buf, uint64_t start, size_t count
 			size_t b = _buf-(const char*)buf;
 			overlapped.Offset = b;
 			overlapped.OffsetHigh = b>>32;
-		}while(count > 0xFFFFFFFF);
+		}while(count > 0xffffffff);
 		return (_buf-(const char*)buf) + (WriteFile(fd, _buf, (DWORD) count, &bytesWritten, &overlapped) ? bytesWritten : 0);
 	}
 	#endif
@@ -566,7 +566,7 @@ static bool x_move(const char* old_name, const char* new_name){
 static ip_addr_t ip_from_string(const char* str){
 	ip_addr_t a = {.words={0}};
 	if(inet_pton(AF_INET6, str, &a) != 1){
-		if(inet_pton(AF_INET, str, &a.dwords[3]) == 1) a.words[5] = a.dwords[3] ? 0xFFFF : 0;
+		if(inet_pton(AF_INET, str, &a.dwords[3]) == 1) a.words[5] = a.dwords[3] ? 0xffff : 0;
 	}
 	return a;
 }
@@ -577,7 +577,7 @@ static enum ip_kind ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]){
 	return ipv6 ? IP_KIND_V6 : IP_KIND_V4;
 }
 
-static x_socket_t x_udp_auto(){
+static x_socket_t x_udp_auto(void){
 #ifdef SOCK_NONBLOCK
 	int fd = socket(AF_INET6, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
 #else
@@ -635,7 +635,7 @@ static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from){
 		}else{
 			struct sockaddr_in* addr4 = (struct sockaddr_in*)&addr;
 			from->addr.dwords[0] = from->addr.dwords[1] = 0;
-			from->addr.words[4] = 0; from->addr.words[5] = 0xFFFF;
+			from->addr.words[4] = 0; from->addr.words[5] = 0xffff;
 			from->addr.dwords[3] = addr4->sin_addr.s_addr;
 			from->port = ntohs(addr.sin6_port);
 		}
@@ -721,7 +721,7 @@ static int x_udp_next_read(x_socket_t sock, remote_t* from, void* msg, size_t ma
 		}else{
 			struct sockaddr_in* addr4 = (struct sockaddr_in*)&addr;
 			from->addr.dwords[0] = from->addr.dwords[1] = 0;
-			from->addr.words[4] = 0; from->addr.words[5] = 0xFFFF;
+			from->addr.words[4] = 0; from->addr.words[5] = 0xffff;
 			from->addr.dwords[3] = addr4->sin_addr.s_addr;
 			from->port = ntohs(addr.sin6_port);
 			from->interface = 0;
@@ -921,7 +921,7 @@ static x_event_t x_event_queue_wait(x_event_queue_t* queue, uint64_t timeout){
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 		while(wc&1024){
 			if(timeout != -1ull){
-				if(syscall(SYS_ulock_wait, 0x1000001, &queue->_bits, wc, timeout >> 32 ? 0xFFFFFFFF : timeout) && errno == EINTR) return (x_event_t){X_EVENT_SIGNAL, {0}};
+				if(syscall(SYS_ulock_wait, 0x1000001, &queue->_bits, wc, timeout >> 32 ? 0xffffffff : timeout) && errno == EINTR) return (x_event_t){X_EVENT_SIGNAL, {0}};
 				struct timespec n2;
 				clock_gettime(CLOCK_MONOTONIC, &n2);
 				uint64_t rm = (uint64_t)(n2.tv_sec - now.tv_sec) * 1000000 + (uint64_t)((n2.tv_nsec - now.tv_nsec)/1000);

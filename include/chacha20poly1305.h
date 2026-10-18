@@ -63,7 +63,7 @@ void ChaCha20_block_xor(uint32_t in[16], uint8_t out[64], uint32_t n){
 	uint32x4_t c = vld1q_u32(in + 8);
 	uint32x4_t d = vld1q_u32(in + 12);
 
-	for (int i = 0; i < 10; i++) {
+	for(int i = 0; i < 10; i++){
 		_cc20_p1305_CHACHA20_ROUND(a, b, c, d);
 		b = vextq_u32(b, b, 1);
 		c = vextq_u32(c, c, 2);
@@ -91,7 +91,7 @@ void ChaCha20_block(uint32_t io[16]){
 	uint32x4_t c = vld1q_u32(io + 8);
 	uint32x4_t d = vld1q_u32(io + 12);
 
-	for (int i = 0; i < 10; i++) {
+	for(int i = 0; i < 10; i++){
 		_cc20_p1305_CHACHA20_ROUND(a, b, c, d);
 		b = vextq_u32(b, b, 1);
 		c = vextq_u32(c, c, 2);
@@ -164,7 +164,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		a = __riscv_vadd_vv_u32m1(a, b, vl); d = __riscv_vxor_vv_u32m1(d, a, vl); d = __riscv_vror_vi_u32m1(d, 24, vl); \
 		c = __riscv_vadd_vv_u32m1(c, d, vl); b = __riscv_vxor_vv_u32m1(b, c, vl); b = __riscv_vror_vi_u32m1(b, 25, vl);
 
-	_CC20_P1305_SIMD void ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n) {
+	_CC20_P1305_SIMD void ChaCha20_block_xor__simd(uint32_t in[16], uint8_t out[64], uint32_t n){
 		size_t vl = __riscv_vsetvl_e32m1(4);
 		vuint32m1_t idx_rot1 = __riscv_vle32_v_u32m1((const uint32_t[4]){1, 2, 3, 0}, vl);
 		vuint32m1_t idx_rot2 = __riscv_vle32_v_u32m1((const uint32_t[4]){2, 3, 0, 1}, vl);
@@ -176,7 +176,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		vuint32m1_t c = __riscv_vle32_v_u32m1(in + 8, vl);
 		vuint32m1_t d = __riscv_vle32_v_u32m1(in + 12, vl);
 
-		for (int i = 0; i < 10; i++) {
+		for(int i = 0; i < 10; i++){
 			_cc20_p1305_CHACHA20_ROUND(a, b, c, d, vl);
 			b = __riscv_vrgather_vv_u32m1(b, idx_rot1, vl);
 			c = __riscv_vrgather_vv_u32m1(c, idx_rot2, vl);
@@ -199,7 +199,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 
 		if(--n){ in[12]++; out += 64; goto start; }
 	}
-	_CC20_P1305_SIMD void ChaCha20_block__simd(uint32_t io[16]) {
+	_CC20_P1305_SIMD void ChaCha20_block__simd(uint32_t io[16]){
 		size_t vl = __riscv_vsetvl_e32m1(4);
 		vuint32m1_t idx_rot1 = __riscv_vle32_v_u32m1((const uint32_t[4]){1, 2, 3, 0}, vl);
 		vuint32m1_t idx_rot2 = __riscv_vle32_v_u32m1((const uint32_t[4]){2, 3, 0, 1}, vl);
@@ -210,7 +210,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		vuint32m1_t c = __riscv_vle32_v_u32m1(io + 8, vl);
 		vuint32m1_t d = __riscv_vle32_v_u32m1(io + 12, vl);
 
-		for (int i = 0; i < 10; i++) {
+		for(int i = 0; i < 10; i++){
 			_cc20_p1305_CHACHA20_ROUND(a, b, c, d, vl);
 			b = __riscv_vrgather_vv_u32m1(b, idx_rot1, vl);
 			c = __riscv_vrgather_vv_u32m1(c, idx_rot2, vl);
@@ -264,7 +264,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		__m128i c = _mm_loadu_si128((const __m128i*)(in + 8));
 		__m128i d = _mm_loadu_si128((const __m128i*)(in + 12));
 
-		for (int i = 0; i < 10; i++) {
+		for(int i = 0; i < 10; i++){
 			_cc20_p1305_CHACHA20_ROUND(a, b, c, d);
 			b = _mm_shuffle_epi32(b, _MM_SHUFFLE(0, 3, 2, 1));
 			c = _mm_shuffle_epi32(c, _MM_SHUFFLE(1, 0, 3, 2));
@@ -294,7 +294,7 @@ static inline void ChaCha20_block__software(uint32_t io[16]){
 		__m128i c = _mm_loadu_si128((const __m128i*)(io + 8));
 		__m128i d = _mm_loadu_si128((const __m128i*)(io + 12));
 
-		for (int i = 0; i < 10; i++) {
+		for(int i = 0; i < 10; i++){
 			_cc20_p1305_CHACHA20_ROUND(a, b, c, d);
 			b = _mm_shuffle_epi32(b, _MM_SHUFFLE(0, 3, 2, 1));
 			c = _mm_shuffle_epi32(c, _MM_SHUFFLE(1, 0, 3, 2));

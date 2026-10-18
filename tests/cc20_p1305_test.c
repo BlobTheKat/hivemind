@@ -3,17 +3,18 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <ctype.h>
 #include <sodium.h>
 
 #define WIDTH 16
 
-void hexdump(const void *data, size_t len) {
+void hexdump(const void *data, size_t len){
 	const uint8_t *p = (const uint8_t *)data;
 
-	for (size_t i = 0; i < len; i += WIDTH) {
+	for(size_t i = 0; i < len; i += WIDTH){
 		/* Hex bytes */
-		for (size_t j = 0; j < WIDTH; j++) {
+		for(size_t j = 0; j < WIDTH; j++){
 			if (i + j < len)
 				printf((j&3)==3?"%02x   ":"%02x ", p[i + j]);
 		}
@@ -38,7 +39,7 @@ void* work(void* _){
 #if POLY1305_TESTS > 0
 	for(int i = 0; i < POLY1305_TESTS; i++){
 		_Alignas(4) unsigned char key[32], tag[16], tag2[16];
-		int msglen = (rand()&0xFF)+1;
+		int msglen = (rand()&0xff)+1;
 		unsigned char msg[msglen];
 		randombytes_buf(msg, msglen);
 		randombytes_buf(key, 32);

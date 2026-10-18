@@ -42,12 +42,12 @@ struct Pipe: hivemind_pipe_t{
 	};
 	Pipe() = default;
 	Pipe(hivemind_pipe_t p): hivemind_pipe_t(p){}
-	// Get the string representation of a pipe, which currently looks like `[IP]/port/mtu/time/rand_b64`.
+	// Get the string representation of a pipe, which currently looks like `[IP]/[port]/[mtu]/[time]/[rand_b64][QOS]`.
 	std::string to_string(){
 		char out[HIVEMIND_PIPE_STR_MAX_LEN];
 		return {out, hivemind_pipe_to_string(this, out)};
 	}
-	// Parse a string representation of a pipe, which currently looks like `[IP]/port/mtu/time/rand_b64`. If the string does not represents a valid pipe, the returned pipe will be zero-initialized, and `is_valid()` will return false (all-zero is never a valid pipe).
+	// Parse a string representation of a pipe, which currently looks like `[IP]/[port]/[mtu]/[time]/[rand_b64][QOS]`. If the string does not represents a valid pipe, the returned pipe will be zero-initialized, and `is_valid()` will return false (all-zero is never a valid pipe).
 	static Pipe from_string(const std::string& in){
 		Pipe p;
 		if(!hivemind_pipe_from_string(&p, in.c_str()))
@@ -88,7 +88,7 @@ template<typename T_ = Self, typename P = void> struct Server: hivemind_server_t
 	template<typename... Args>
 	Server(Args&&... a){ this->init(std::forward<Args>(a)...); }
 
-	// Initialize a server with the given master key, message callback and optional message failure callback
+	// Initialize a server with the given master key and message callback
 	void init(const uint8_t master_key[32], MsgFn on_msg){
 		hivemind_init(this, master_key, (hivemind_on_pipe_msg_fn_t)on_msg);
 	}
@@ -96,16 +96,16 @@ template<typename T_ = Self, typename P = void> struct Server: hivemind_server_t
 	// If you would like to supply your own address, port, MTU or any combination of those to override the results from the reflection test, you can call `configure()` before calling `start()`. If all three parameters are non-zero, the reflection test is skipped entirely.
 	void configure(ip_addr_t addr, uint16_t port, uint16_t mtu = 0){
 		this->addr = addr;
-		this->port_lo = port & 0xFF;
+		this->port_lo = port & 0xff;
 		this->port_hi = port >> 8;
-		this->mtu_lo = mtu & 0xFF;
+		this->mtu_lo = mtu & 0xff;
 		this->mtu_hi = mtu >> 8;
 	}
 	// Start listening on the given address, with an optional reflection test IP (this is used to discover the local address, port and MTU). Returns true on success.
 	bool start(remote_t where, ip_addr_t reflect_test = HIVEMIND_WAN_V4, const char* filename = 0, PipeRestoreFn pipe_restore = 0){
 		return hivemind_start(this, where, reflect_test, filename, (hivemind_pipe_restore_fn_t) pipe_restore);
 	}
-	// Quit the server, optionally saving state to a file (not implemented yet). The callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
+	// Quit the server, optionally saving state to a file. The callback will be called once the server is fully stopped. The server struct can be reused / freed from the moment this callback is called.
 	void quit(GenericFn on_close = 0, const char* filename = 0, PipeFinishFn pipe_finish = 0){
 		hivemind_quit(this, (void(*)(void*))on_close, filename, (hivemind_pipe_finish_fn_t) pipe_finish);
 	}

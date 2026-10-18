@@ -71,15 +71,8 @@ _Static_assert(sizeof(hivemind_pipe_t) == 40, "");
 
 typedef enum hivemind_pipe_close_reason{
 	HIVEMIND_CLOSED_PIPE_INVALID = 1, // This specific pipe definitely no longer exists as declared by the recipient node.
-	HIVEMIND_CLOSED_CONTINUITY_RETAINED = 2, // The remote is definitely still up and hasn't lost any state other than maybe closing the specific pipe.
-	HIVEMIND_CLOSED_CONTINUITY_LOST = 4, // The remote is definitely up but has lost its state since the pipe was created and now. This is perhaps because it has restarted in that time period without a clean hivemind save-restore.
-	HIVEMIND_CLOSED_TIMEOUT = 8, // This close event was generated as the result of a timeout. If the pipe still exists, resending to this pipe forfeits all order/delivery guarantees relative to previous messages. The simplest way to handle this consistently is to treat the same pipe as if it was an unrelated pipe (even if their byte representations compare equal).
-
-	// Specific failure modes you will actually receive
-	HIVEMIND_CLOSED_MESSAGE_PIPE_REJECTED = 3, // PIPE_INVALID | CONTINUITY_RETAINED. The connection remains open but the remote node rejected the message as the pipe has been closed.
-	HIVEMIND_CLOSED_MESSAGE_PIPE_OUT_OF_BOUNDS = 5, // PIPE_INVALID | CONTINUITY_LOST. This is an old pipe from a previous epoch. Implementation detail: this can be discovered immediately if a connection was already open, or after a few RTTs if it was the opening message of a new connection, which then required a probe packet to discover the reason for failed connection. If this happens, all pipes out of bounds are closed at the same time.
-
-	HIVEMIND_CLOSED_BACKPRESSURE = 16
+	HIVEMIND_CLOSED_TIMEOUT = 4, // This close event was generated as the result of a timeout. If the pipe still exists, resending to this pipe forfeits all order/delivery guarantees relative to previous messages. The simplest way to handle this consistently is to treat the same pipe as if it was an unrelated pipe (even if their byte representations compare equal).
+	HIVEMIND_CLOSED_BACKPRESSURE = 8
 } hivemind_pipe_close_reason_t;
 
 #define hivemind_is_err(sz) ((sz) >= SIZE_MAX-63)
@@ -136,7 +129,7 @@ void hivemind_packet_free(const uint8_t* packet);
 // 1. `hivemind_close_pipe()` blocks until all remaining `hivemind_pipe_unlock()`s are called, and the closer thread will see pending messages and know not to free the associated (user) data yet.
 // 2. `hivemind_close_pipe()` happens early enough and the message is rejected, your message callback was never invoked, no use-after-free.
 // Calling this function outside of a callback invocation is undefined behavior.
-void hivemind_pipe_unlock();
+void hivemind_pipe_unlock(void);
 
 // Send a message to the given pipe. The message is guaranteed to be delivered as long as the pipe is not closed, and there is no network partition longer than the state cutoff, as defined by the receiver. Messages larger than the minimum MTU (minus overhead) will be fragmented (fragmentation primarily affects tail latency).
 // The message will be copied, `msg` does not need to remain valid after this function returns. This function also performs all of the necessary encryption itself. If the current thread is important (e.g UI thread) and the message is large, you should probably defer this call to another thread
@@ -151,9 +144,9 @@ void hivemind_create_pipe(hivemind_server_t* server, hivemind_pipe_t* pipe, void
 // Message delivery failure notifications will also follow the same semantics as regular messages: if they would be delivered after this close, they are instead discarded.
 void* hivemind_close_pipe(hivemind_server_t* server, const hivemind_pipe_t* pipe);
 
-// Get the string representation of a pipe, which currently looks like `[IP]/port/mtu/time/rand_b64`. The string is null-terminated and its length (excluding the null character) is returned.
+// Get the string representation of a pipe, which currently looks like `[IP]/[port]/[mtu]/[time]/[rand_b64][QOS]`. The string is null-terminated and its length (excluding the null character) is returned.
 size_t hivemind_pipe_to_string(const hivemind_pipe_t* pipe, char out[HIVEMIND_PIPE_STR_MAX_LEN]);
-// Parse a string representation of a pipe, which currently looks like `[IP]/port/mtu/time/rand_b64`. If the string represents a valid pipe, the function returns true and writes the result to `pipe`. Otherwise, it returns false and the contents of `pipe` are invalidated.
+// Parse a string representation of a pipe, which currently looks like `[IP]/[port]/[mtu]/[time]/[rand_b64][QOS]`. If the string represents a valid pipe, the function returns true and writes the result to `pipe`. Otherwise, it returns false and the contents of `pipe` are invalidated.
 bool hivemind_pipe_from_string(hivemind_pipe_t* pipe, const char in[HIVEMIND_PIPE_STR_MAX_LEN]);
 
 #ifdef __cplusplus

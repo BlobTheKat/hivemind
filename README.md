@@ -45,7 +45,7 @@ void on_msg(hivemind_server_t* s, void* userdata, uint8_t* payload, size_t size)
 hivemind_server_t h_server;
 int main(){
 	uint8_t master_key[32];
-	load_master_key(&master_key, "./.master.key");
+	load_master_key(master_key, "./.master.key");
 	hivemind_init(&h_server, master_key, (hivemind_on_pipe_msg_fn_t) on_msg);
 
 	hivemind_start(&h_server, (remote_t){

@@ -34,7 +34,7 @@
 
 #ifdef _MSC_VER
 #include <stdarg.h>
-int asprintf(char** strp, const char* fmt, ...) {
+int asprintf(char** strp, const char* fmt, ...){
 	va_list ap;
 	va_start(ap, fmt);
 	// compute required length (excluding null terminator)
@@ -51,7 +51,7 @@ int asprintf(char** strp, const char* fmt, ...) {
 	*strp = buf;
 	return len;
 }
-int __shim_bsrz(size_t x){
+static inline int __shim_size_mag_bsrz(size_t x){
 	unsigned long index;
 #if SIZE_MAX == UINT_MAX
 	if(_BitScanReverse(&index, x)) return index+1;
@@ -60,7 +60,7 @@ int __shim_bsrz(size_t x){
 #endif
 	__assume(0);
 }
-#define size_magn(x) __shim_bsrz(x)
+#define size_magn(x) __shim_size_mag_bsrz(x)
 #define templated static __forceinline inline
 #define noinline static __declspec(noinline)
 #else
@@ -75,7 +75,7 @@ int __shim_bsrz(size_t x){
 
 static_assert(sizeof(size_t) == sizeof(void*));
 
-// A fast approximation to 2^x, with a maximum relative error of about 0.088%
+// A fast approximation to 2^x, with a maximum relative error of about 0.205%
 static inline float fast_exp2f(float x){
 	float xi = floorf(x); x -= xi;
 	x *= 0.66596094f + 0.32993240f*x;
@@ -302,7 +302,30 @@ templated size_t ring_iterator_next(ring_iterator_t* obj, void* d, size_t sz, bo
 		memcpy(d, head, sz);
 		obj->head = head+sz;
 	}
-	return obj->remaining -= sz;
+	size_t rem = obj->remaining;
+	obj->remaining = rem-sz;
+	return rem;
+}
+
+templated size_t ring_iterator_skip(ring_iterator_t* obj, size_t sz, bool aligned){
+	char *head = obj->head;
+	if(head >= obj->end){
+		size_t cap = obj->cap_exp;
+		if(cap) obj->head = head -= 1ull<<(int)cap, obj->cap_exp = 0, obj->end = head+obj->remaining;
+		else return false;
+	}
+	assert(sz <= obj->remaining, "Iterator index overflow");
+	if(!aligned && head+sz > obj->end){
+		size_t sz2 = (size_t)(obj->end-obj->head);
+		size_t cap = obj->cap_exp; // assumed, overrun is UB
+		obj->head = head -= 1ull<<(int)cap, obj->cap_exp = 0, obj->end = head+obj->remaining-sz2;
+	}else{
+		if(aligned) assert(head+sz <= obj->end && !(sz&(sz-1)), "Alignment condition violated");
+		obj->head = head+sz;
+	}
+	size_t rem = obj->remaining;
+	obj->remaining = rem-sz;
+	return rem;
 }
 
 templated void ring_buffer_destroy(ring_buffer_t* obj){
@@ -421,12 +444,12 @@ templated void array_buffer_pop_discard(array_buffer_t* obj, size_t sz){
 
 templated void array_buffer_pop(array_buffer_t* obj, void* d, size_t sz){
 	size_t cap = obj->cap_exp;
+	obj->size -= sz;
 	if(!cap){
-		memcpy(d, &obj->data, sz);
-		obj->size -= sz;
+		memcpy(d, obj->data_i+obj->size, sz);
 	}else{
-		memcpy(d, obj->data, sz);
-		if((obj->size -= sz) <= (1ull<<(int)(cap-2)))
+		memcpy(d, obj->data+obj->size, sz);
+		if(obj->size <= (1ull<<(int)(cap-2)))
 			_array_buffer_shrink(obj);
 	}
 }
@@ -448,7 +471,16 @@ templated size_t array_iterator_next(array_iterator_t* obj, void* d, size_t sz){
 	char *head = obj->head;
 	memcpy(d, head, sz);
 	obj->head = head+sz;
-	return obj->remaining -= sz;
+	size_t rem = obj->remaining;
+	obj->remaining = rem-sz;
+	return rem;
+}
+
+templated size_t array_iterator_skip(array_iterator_t* obj, size_t sz){
+	obj->head += sz;
+	size_t rem = obj->remaining;
+	obj->remaining = rem-sz;
+	return rem;
 }
 
 templated void array_buffer_destroy(array_buffer_t* obj){
@@ -526,197 +558,6 @@ templated void exclusive_lock_downgrade(shared_lock_t* s){
 	assert(!lock_fetch(s), "exclusive_lock_downgrade() called on shared_lock_t with no exclusive part acquired");
 	lock_release(s, LOCK_MAX-1);
 }
-
-/*// Incomplete hashmap implementation
-typedef union _hashmap_ptr{ union _hashmap_ptr* nextp; uintptr_t value; } _hashmap_ptr;
-#if SIZE_MAX >= UINT64_MAX
-typedef struct hashmap_t{
-	_hashmap_ptr* entries;
-	size_t b_exp:8, size:sizeof(size_t)*CHAR_BIT-8;
-} hashmap_t;
-static_assert(sizeof(hashmap_t) == sizeof(size_t) * 2);
-#else
-typedef struct hashmap_t{
-	_hashmap_ptr* entries;
-	size_t b_exp, size;
-} hashmap_t;
-static_assert(sizeof(hashmap_t) == sizeof(size_t) * 3);
-#endif
-typedef struct hash_iterator_t{
-	_hashmap_ptr *bucket_start, *last_bucket;
-	_hashmap_ptr *cur; size_t adv;
-} hash_iterator_t;
-static_assert(sizeof(hash_iterator_t) == sizeof(size_t) * 4);
-
-#define adv_aligned(p, a) (((p)+(a)-1)&~(a))
-
-typedef struct hashmap_descriptor_t{
-	size_t size, align;
-	uint64_t (*hash)(void*);
-	uint64_t (*hash_value)(void*);
-	bool (*compare)(void* key, void* candidate);
-	void (*move)(void* new_, void* old);
-} hashmap_descriptor_t;
-
-noinline void _hashmap_grow1(hashmap_t* map, hashmap_descriptor_t* desc){
-	unsigned bexp = map->b_exp++;
-	size_t new_prefix = (1<<bexp)+1;
-	size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*(new_prefix+(4<<bexp)), desc->align) + desc->size*(4<<bexp);
-	_hashmap_ptr* entries2 = (_hashmap_ptr*)(desc->align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc->align) : malloc(alloc_sz));
-	if(!entries2) abort();
-	memset(entries2, 0, sizeof(_hashmap_ptr)*((1<<bexp)+1));
-	size_t old_prefix = (1<<(bexp-1))+1;
-	char* old_heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(old_prefix+(4<<(bexp-1))), desc->align);
-	char* new_heap = (char*)entries2+adv_aligned(sizeof(_hashmap_ptr)+(new_prefix+(4<<bexp)), desc->align);
-	size_t newsz = 0;
-	// savenge move
-	for(size_t i = new_prefix-1; i; i--){
-		_hashmap_ptr ptr = map->entries[i];
-		while(ptr.value){
-			char* old = old_heap+(ptr.nextp-map->entries-old_prefix)*desc->size;
-			if(desc->move) desc->move(new_heap, old);
-			else memcpy(new_heap, old, desc->size);
-			uint64_t h = desc->hash_value(new_heap), h2 = (h>>(64-bexp))+1; h &= sizeof(uintptr_t)-1;
-			_hashmap_ptr next = {.value = entries2[h2].value+h};
-			entries2[new_prefix+newsz] = next;
-			entries2[h2].nextp = entries2+new_prefix+newsz;
-			new_heap += desc->size; newsz++;
-			ptr = *ptr.nextp;
-		}
-	}
-	free(map->entries);
-	map->size = newsz;
-	map->entries = entries2;
-}
-
-templated hash_iterator_t hashmap_find_iterator(const hashmap_t* map, hashmap_descriptor_t desc, void* key){
-	unsigned bexp = map->b_exp;
-	if(!bexp) return (hash_iterator_t){};
-	bexp--;
-	uint64_t h = desc.hash(key);
-	_hashmap_ptr* bucket = &map->entries[(bexp ? h>>(64-bexp) : 0)+1];
-	_hashmap_ptr ptr = *bucket;
-	_hashmap_ptr* optr = ptr.nextp;
-	h &= sizeof(uintptr_t)-1;
-	while(ptr.value){
-		ptr = *optr;
-		if((ptr.value&(sizeof(uintptr_t)-1)) == h){
-			// Maybe match!
-			size_t prefix = (1<<bexp)+1;
-			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
-			if(desc.compare(key, (void*)(heap + (optr-map->entries - prefix)*desc.size))){
-				return (hash_iterator_t){bucket, map->entries+prefix, optr, (4<<bexp)};
-			}
-		}
-		optr = ptr.nextp;
-	}
-	return (hash_iterator_t){};
-}
-
-templated bool hashmap_iterator_is_valid(const hash_iterator_t* it){ return (bool)it->cur.value; }
-
-templated void* hashmap_find(const hashmap_t* map, hashmap_descriptor_t desc, void* key){
-	unsigned bexp = map->b_exp;
-	if(!bexp) return 0;
-	bexp--;
-	uint64_t h = desc.hash(key);
-	_hashmap_ptr ptr = map->entries[(bexp ? h>>(64-bexp) : 0)+1];
-	_hashmap_ptr* optr = ptr.nextp;
-	h &= sizeof(uintptr_t)-1;
-	while(ptr.value){
-		ptr = *optr;
-		if((ptr.value&(sizeof(uintptr_t)-1)) == h){
-			// Maybe match!
-			size_t prefix = (1<<bexp)+1;
-			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
-			void* candidate = (void*)(heap + (optr-map->entries - prefix)*desc.size);
-			if(desc.compare(key, candidate)) return candidate;
-		}
-		optr = ptr.nextp;
-	}
-	return 0;
-}
-
-templated void* hashmap_insert(hashmap_t* map, hashmap_descriptor_t desc, void* key){
-	unsigned bexp = map->b_exp;
-	uint64_t h = desc.hash(key);
-	if(!bexp){
-		size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*6, desc.align) + desc.size*4;
-		map->entries = (_hashmap_ptr*)(desc.align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc.align) : malloc(alloc_sz));
-		map->b_exp = 1; map->size = 1;
-		memset(map->entries, 0, sizeof(_hashmap_ptr)*6);
-		map->entries[1].nextp = &map->entries[2];
-		map->entries[2].value = h&(sizeof(uintptr_t)-1);
-		return (char*)map->entries + adv_aligned(sizeof(_hashmap_ptr)*6, desc.align);
-	}
-	bexp--;
-	size_t prefix = (1<<bexp)+1;
-	size_t idx = map->entries[0].value;
-	if(idx){ // consume from free list
-		map->entries[0] = map->entries[idx];
-	}else{
-		if(map->size >= (4<<bexp))
-			_hashmap_grow1(map, &desc);
-		idx = map->size++ + prefix;
-	}
-	uint64_t h2 = (h>>(64-bexp))+1; h &= sizeof(uintptr_t)-1;
-	map->entries[idx].nextp = map->entries[h2].nextp+h;
-	map->entries[h2].nextp = map->entries+idx;
-	char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
-	return heap+(idx-prefix)*desc.size;
-}
-
-templated bool hashmap_find_or_insert(hashmap_t* map, hashmap_descriptor_t desc, void* key, void** out){
-	unsigned bexp = map->b_exp;
-	uint64_t h = desc.hash(key);
-	if(!bexp){
-		size_t alloc_sz = adv_aligned(sizeof(_hashmap_ptr)*6, desc.align) + desc.size*4;
-		map->entries = (_hashmap_ptr*)(desc.align > alignof(max_align_t) ? aligned_alloc(alloc_sz, desc.align) : malloc(alloc_sz));
-		map->b_exp = 1; map->size = 1;
-		memset(map->entries, 0, sizeof(_hashmap_ptr)*6);
-		map->entries[1].nextp = &map->entries[2];
-		map->entries[2].value = h&(sizeof(uintptr_t)-1);
-		*out = (char*)map->entries + adv_aligned(sizeof(_hashmap_ptr)*6, desc.align);
-		return true;
-	}
-	bexp--;
-	size_t prefix = (1<<bexp)+1;
-	uint64_t h2 = (h>>(64-bexp))+1; h &= 7;
-	_hashmap_ptr ptr = map->entries[h2];
-	_hashmap_ptr* optr = ptr.nextp;
-	while(optr){
-		ptr = *optr;
-		if((ptr.value&7) == h){
-			// Maybe match!
-			char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
-			void* candidate = (void*)(heap + (optr-map->entries - prefix)*desc.size);
-			if(desc.compare(key, candidate)){ *out = candidate; return false; }
-		}
-		optr = ptr.nextp;
-	}
-	size_t idx = map->entries[0].value;
-	if(idx){ // consume from free list
-		map->entries[0] = map->entries[idx];
-	}else{
-		if(map->size >= (4<<bexp))
-			_hashmap_grow1(map, &desc);
-		idx = map->size++ + prefix;
-	}
-	map->entries[idx].nextp = map->entries[h2].nextp+h;
-	map->entries[h2].nextp = map->entries+idx;
-	char* heap = (char*)map->entries+adv_aligned(sizeof(_hashmap_ptr)*(prefix+(4<<bexp)), desc.align);
-	*out = heap+(idx-prefix)*desc.size;
-	return true;
-}
-
-templated bool hashmap_delete(hashmap_t* map, hashmap_descriptor_t desc, void* key){
-
-}
-
-
-templated void hashmap_destroy(hashmap_t* map, hashmap_descriptor_t _){
-	if(map->b_exp) free(map->entries);
-}*/
 
 #if SIZE_MAX >= UINT64_MAX
 typedef struct hash_table_t{ uintptr_t cap_exp:8, data:sizeof(uintptr_t)*CHAR_BIT-8; } hash_table_t;

@@ -89,8 +89,8 @@ deprecate("puts() with -DNO_STDIO") static int (*const puts_2)(const char*) = pu
 #endif
 
 #ifdef __SANITIZE_THREAD__
-	_Atomic uint32_t __tsan_sync;
-	#define tsan_fence(m) atomic_fetch_add_explicit(&__tsan_sync, 1, m)
+	_Atomic uint32_t __tsan_sync_counter;
+	#define tsan_fence(m) atomic_fetch_add_explicit(&__tsan_sync_counter, 1, m)
 #else
 	#define tsan_fence(m) 0
 #endif

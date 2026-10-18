@@ -34,7 +34,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	static void on_msg(void* s_, void* udata, const uint8_t* payload, size_t size){
 		HivemindServerJS* s = (HivemindServerJS*)s_;
 		PipeMeta* m = static_cast<PipeMeta*>(udata);
-		m->ref.fetch_add(1, std::memory_order::relaxed);
+		m->ref.fetch_add(1, relaxed);
 		s->msg_lock.lock();
 		hivemind_pipe_unlock(); // happens after msg_lock acquire to preserve order for same pipes
 		s->msgs.push_back({m, hivemind_packet_detach(payload), size});
@@ -64,7 +64,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 				item.m->cb.Value().Call({v});
 				v.Detach();
 			}
-			if(item.m->ref.fetch_sub(1, std::memory_order::release) == 1){
+			if(item.m->ref.fetch_sub(1, release) == 1){
 				atomic_thread_fence(memory_order_acquire);
 				delete item.m;
 			}
@@ -161,7 +161,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		return DefineClass(env, "HivemindServer", {
 			StaticMethod("pipeToString", &HivemindServerJS::PipeToString),
 			StaticMethod("pipeFromString", &HivemindServerJS::PipeFromString),
-			InstanceMethod("listen", &HivemindServerJS::listen),
+			InstanceMethod("listen", &HivemindServerJS::Listen),
 			InstanceMethod("createPipe", &HivemindServerJS::CreatePipe),
 			InstanceMethod("deletePipe", &HivemindServerJS::DeletePipe),
 			InstanceMethod("send", &HivemindServerJS::Send),
@@ -193,7 +193,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	public:
 	HivemindServerJS(const Napi::CallbackInfo& info) : Napi::ObjectWrap<HivemindServerJS>(info), async_context(info.Env(), "Hivemind"){
 		auto env = info.Env();
-		if(info.Length() != 1 || !info[0].IsObject()) {
+		if(info.Length() != 1 || !info[0].IsObject()){
 			Napi::TypeError::New(env, "Failed to construct 'HivemindServer': First and only argument must be an object").ThrowAsJavaScriptException();
 		}
 		auto props = info[0].As<Napi::Object>();
@@ -262,7 +262,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			server_.network_bypass_prefix_v4 = (uint8_t)v;
 		}
 	}
-	Napi::Value listen(const Napi::CallbackInfo& info){
+	Napi::Value Listen(const Napi::CallbackInfo& info){
 		if(this->state.load(relaxed) != State::CLOSED){
 			Napi::Error::New(info.Env(), "Failed to execute 'listen' on 'HivemindServer': The server is already running").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
@@ -331,7 +331,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	HivemindServerJS(const HivemindServerJS&) = delete;
 	HivemindServerJS& operator=(const HivemindServerJS&) = delete;
 
-	Napi::Value CreatePipe(const Napi::CallbackInfo& info) {
+	Napi::Value CreatePipe(const Napi::CallbackInfo& info){
 		if(info.Length() < 1 || !info[0].IsFunction()){
 			Napi::TypeError::New(info.Env(), "Failed to execute 'createPipe' on 'HivemindServer': First argument must be a function").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
@@ -344,7 +344,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	Napi::Value GetReadyState(const Napi::CallbackInfo& info){
 		return Napi::Number::New(info.Env(), (int)this->state.load(relaxed)>>4);
 	}
-	Napi::Value DeletePipe(const Napi::CallbackInfo& info) {
+	Napi::Value DeletePipe(const Napi::CallbackInfo& info){
 		if(info.Length() < 1 || !info[0].IsArrayBuffer()) err: {
 			Napi::TypeError::New(info.Env(), "Failed to execute 'deletePipe' on 'HivemindServer': First argument must be an ArrayBuffer of length 40").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
@@ -355,7 +355,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		memcpy(&pipe, pipev.Data(), sizeof(hivemind_pipe_t));
 		PipeMeta* m = (PipeMeta*) hivemind_close_pipe(&server_, &pipe);
 		m->cb.Unref();
-		if(m->ref.fetch_sub(1, std::memory_order::release) == 1){
+		if(m->ref.fetch_sub(1, release) == 1){
 			atomic_thread_fence(memory_order_acquire);
 			delete m;
 		}
@@ -374,10 +374,10 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		return ret;
 	}
 
-	Napi::Value Send(const Napi::CallbackInfo& info) {
+	Napi::Value Send(const Napi::CallbackInfo& info){
 		Napi::Env env = info.Env();
 
-		if (info.Length() < 2 || !info[0].IsArrayBuffer()) type_err: {
+		if(info.Length() < 2 || !info[0].IsArrayBuffer()) type_err: {
 			Napi::TypeError::New(info.Env(), "Failed to execute 'send' on 'HivemindServer': First argument must be an ArrayBuffer of length 40. Second argument must be an ArrayBufferView").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
 		}
@@ -404,7 +404,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		return env.Undefined();
 	}
 
-	Napi::Value Quit(const Napi::CallbackInfo& info) {
+	Napi::Value Quit(const Napi::CallbackInfo& info){
 		if(this->state.load(relaxed) != State::OPEN){
 			Napi::Error::New(info.Env(), "Failed to execute 'quit' on 'HivemindServer': The server is not running").ThrowAsJavaScriptException();
 			return info.Env().Undefined();

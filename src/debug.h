@@ -33,9 +33,9 @@ static array_buffer_t logs;
 	char* __out; int __len = asprintf(&__out, __VA_ARGS__); \
 	array_buffer_push(&logs, __out, (size_t)__len); free(__out); \
 }while(0);
-static void __uncork_logs(){
+static void _uncork_logs(void){
 	fwrite(array_buffer_data(&logs), array_buffer_size(&logs), 1, stdout);
 	array_buffer_destroy(&logs);
 	memset(&logs, 0, sizeof(logs));
 }
-static void (*uncork_logs)() = __uncork_logs;
+static void (*uncork_logs)(void) = _uncork_logs;

@@ -16,7 +16,7 @@ uint64_t crc64(uint64_t init, const uint8_t* data, size_t len);
 #if defined(CRC64_IMPL) || defined(__INTELLISENSE__)
 
 static uint64_t crc64__software(uint64_t x, const uint8_t *data, size_t len){
-	for (size_t i = 0; i < len; ++i) {
+	for(size_t i = 0; i < len; ++i){
 		x ^= (uint64_t)data[i];
 		for(unsigned bit = 0; bit < 8; ++bit)
 			x = (x >> 1) ^ (x&1 ? 0x95ac9329ac4bc9b5ull : 0); // Jones polynomial

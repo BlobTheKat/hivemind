@@ -156,7 +156,7 @@ static void ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
 
 
 // Create a new UDP socket which will automatically select a port/address/interface as needed, ideal for clients
-static x_socket_t x_udp_auto();
+static x_socket_t x_udp_auto(void);
 
 // Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the MTU for that path. The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
 static void x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from);
