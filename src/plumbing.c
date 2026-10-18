@@ -437,9 +437,9 @@ static inline void _hv_keyless_packet_finish(hivemind_server_t* s, const remote_
 	uint32_t poly_key[8];
 	_hv_keyless_sig(s, to, (uint32_t*)(packet+20), poly_key, (uint32_t*)(packet+40), payload_len > 32 ? 32 : payload_len>>2);
 	*(uint32_t*)(packet+16) = *(uint32_t*)(packet+20); *(uint32_t*)(packet+20) = htole32(opts<<8);
-	uint32_t tmp = *(uint32_t*)(packet+36); *(uint32_t*)(packet+36) = opts;
+	uint32_t knonce4 = *(uint32_t*)(packet+36); *(uint32_t*)(packet+36) = opts;
 	Poly1305(packet+36, payload_len+4, (uint8_t*)poly_key, packet);
-	*(uint32_t*)(packet+36) = tmp;
+	*(uint32_t*)(packet+36) = knonce4;
 	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len+40);
 	soft_assert(send_success);
 }
@@ -449,10 +449,10 @@ static inline void _hv_crcinitless_packet_finish(hivemind_server_t* s, const rem
 	*(uint32_t*)packet = htole32(shash); *(uint32_t*)(packet+4) = htole32(shash>>32);
 	*(uint32_t*)(packet+8) = htole32(dhash); *(uint32_t*)(packet+16) = htole32(dhash>>32);
 	*(uint32_t*)(packet+12) = htole32(opts<<8);
-	uint64_t id = _hv_alloc_id_short(s), crc = crc64(id, packet, payload_len);
+	uint64_t id = _hv_alloc_id_short(s), crc = crc64(id, packet, payload_len + 20);
 	*(uint32_t*)(packet+8) = htole32(id); *(uint32_t*)(packet+16) = htole32(id>>32);	
 	*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
-	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len + 1);
+	bool send_success = x_udp_send(s->handle, *to, (char*)packet, payload_len + 21);
 	soft_assert(send_success);
 }
 

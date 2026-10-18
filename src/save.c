@@ -261,9 +261,11 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				unsigned sz = _hv_read32(p);
 				uintptr_t p0;
 				if(sz < 0x10000){ // !(sz>>16) && sz!=0 && sz != 0xFFFF
-					uint8_t* p2 = _hv_alloc(sz + (bypass?12:20)) + (bypass?12:20);
+					unsigned header = bypass ? 12 : 20;
+					uint8_t* p2 = _hv_alloc(sz + header) + header;
 					*(uint32_t*)(p2-4) = _hv_read32(p+4);
 					*(uint16_t*)(p2-6) = sz;
+					*(uint16_t*)(p2-8) = sz + header;
 					memcpy(p2, p+8, sz);
 					p += 8+sz;
 					p0 = (uintptr_t)p2 | 2;
@@ -460,7 +462,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					uintptr_t cur;
 					while(ring_iterator_next(&it, &cur, sizeof(cur), true)){
 						uint8_t* buf2;
-						if(cur<4){
+						if(cur < 3){
 							_hv_write32(array_buffer_push_garbage(&b.buf, 4), 0x10000|cur);
 						}else if(!(cur&3)){
 							struct _hv_packet_reassembly* block = (struct _hv_packet_reassembly*)cur;

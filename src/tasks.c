@@ -439,6 +439,7 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 		}else{
 			t = ((t<<8)-(state->ack_coal_tim0<<8)) >> 8;
 			uint32_t seq = (uint32_t)lo-state->ack_coal_buf[14];
+			if(!seq) return; // We already have this seq in the ack queue. sending seq==0 would be dangerous since we use that to differentiate another packet type
 			if(t >= 0x1000000 || seq != (uint32_t)((int32_t)(seq<<24)>>24)){
 				_hv_resolve_seq(&lo, &hi, state->ack_coal_buf[14]);
 				goto imm;
@@ -465,7 +466,7 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 			}
 			uint64_t crc = crc64(state->recv_crcinit, packet, 8+(i<<2));
 			*(uint32_t*)packet = htole32(crc); *(uint32_t*)(packet+4) = htole32(crc>>32);
-			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 8+(i<<2));
+			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 9+(i<<2));
 			soft_assert(send_success);
 		}else{
 			uint32_t chacha[30] = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574}; // "expand 32-byte k"
@@ -480,7 +481,7 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 			for(unsigned j = 1; j < i; j++)
 				pl[j] = htole32(state->ack_coal_buf[j-1]);
 			Poly1305(packet+20, (i<<2)-4, (uint8_t*)chacha, packet);
-			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 16+(i<<2)+bypass);
+			bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet, 16+(i<<2));
 			soft_assert(send_success);
 		}
 		state->ack_coal_i = 0;
@@ -758,13 +759,13 @@ static void _hv_send_probe_ack_err(hivemind_server_t* s, uint32_t opts, const re
 	start[10] = start[4];
 	memcpy(start, s->first_id, 20);
 	start[9] = start[0];
-	_hv_keyless_packet_finish(s, to, packet2, 40, 2);
+	_hv_keyless_packet_finish(s, to, packet2, 40, opts);
 }
 static void _hv_send_probe_ack_err_enc_bypass(hivemind_server_t* s, uint32_t opts, const remote_t* to){
 	uint8_t packet2[61];
-	memcpy(packet2+12, s->first_id, 20);
-	_hv_nalloc_id(s, (uint32_t*)(packet2+32));
-	_hv_crcinitless_packet_finish(s, to, packet2, 40, 2);
+	memcpy(packet2+20, s->first_id, 20);
+	_hv_nalloc_id(s, (uint32_t*)(packet2+40));
+	_hv_crcinitless_packet_finish(s, to, packet2, 40, opts);
 }
 
 #define _hv_is_worth_move(plen, buflen) ((plen) >= ((buflen)>>1)+((buflen)>>3))
@@ -779,7 +780,7 @@ static void _hv_send_probe_ack_err_enc_bypass(hivemind_server_t* s, uint32_t opt
 // size=65534 ptr=N -> Dependent packet idx
 
 // NEW
-// (seq<<1|1) > 3 -> Dependent packet idx
+// (seq<<1|1) > 2 -> Dependent packet idx
 // ptr (algn 4) -> reassembly head
 // ptr (algn 4) | 2 -> Saved packet. Fully reassembled if cur == total
 // 0 -> Not received
@@ -796,8 +797,8 @@ static inline bool _hv_block_add(struct _hv_packet_reassembly* block, uint8_t* p
 	return avail <= plen;
 }
 
-#define _hv_is_partial(p) ((p)>3&&((p)&3)==2)
-#define _hv_is_reassembly(p) ((p)>3&&!((p)&3))
+#define _hv_is_partial(p) ((p)>2&&((p)&3)==2)
+#define _hv_is_reassembly(p) ((p)>2&&!((p)&3))
 
 // Mark a recv_queue slot as processed. Processed slots at the front are shifted off, advancing recv_seq_lo
 static inline void _hv_recv_slot_done(struct _hv_remote* state, size_t idx){
@@ -825,7 +826,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 		uintptr_t cur;
 		ring_buffer_get(&state->recv_queue, idx, &cur, sizeof(cur), true);
 		if(cur){
-			if(cur < 4){
+			if(cur < 3){
 				// already processed
 				_hv_queue_ack(state, lo, hi, tim, false, bypass);
 				goto done;
@@ -857,7 +858,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 				cur = (lo32-pipe_last)<<1 | 1;
 				ring_buffer_set(&state->recv_queue, idx2, &cur, sizeof(cur), true);
 				goto realloc_and_put;
-			}else if(cur > 3){
+			}else if(cur > 2){
 				if unlikely(!soft_assert(!(cur&1))) goto realloc_and_put; // should never happen in practice since this packet would have been already received and ignored
 				if(cur&2){
 					uint8_t* dep = (uint8_t*)(cur-2);
@@ -913,7 +914,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 				assert(idx2 < ring_buffer_size(&state->recv_queue));
 				uintptr_t cur;
 				ring_buffer_get(&state->recv_queue, idx2, &cur, sizeof(cur), true);
-				assert(cur > 3 && !(cur&3));
+				assert(cur > 2 && !(cur&3));
 				block = (struct _hv_packet_reassembly*)cur;
 				lo32 = next; next = block->pipe_next;
 				_hv_queue_ack(state, lo, hi, tim, false, bypass);
@@ -999,6 +1000,7 @@ static inline uint8_t* _hv_push_packet(hivemind_server_t* s, struct _hv_remote* 
 			}
 			*(uint32_t*)(r-4) = next;
 			*(uint16_t*)(r-6) = plen;
+			*(uint16_t*)(r-8) = buflen;
 			cur = (uintptr_t)r | 2;
 			ring_buffer_set(&state->recv_queue, idx, &cur, sizeof(cur), true);
 			if(soft_assert(idx)){
@@ -1069,9 +1071,9 @@ static uint8_t* _hv_drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned 
 				uint64_t dhash = _hv_mix64_addr(s->addr, le16toh(s->port_le)), shash = _hv_mix64_addr(from.addr, from.port);
 				*(uint32_t*)packet = htole32(shash); *(uint32_t*)(packet+4) = htole32(shash>>32);
 				*(uint32_t*)(packet+8) = htole32(dhash); *(uint32_t*)(packet+16) = htole32(dhash>>32);
-				unsigned payload_len = plen-20-(opts>>23<<2); // high bit set = trunc len by 4 bytes
-				if(crc64(crcinit, packet, payload_len) != crc)
+				if(crc64(crcinit, packet, plen) != crc)
 					continue; // crc failed
+				unsigned payload_len = plen-20;
 				struct _hv_remote* state = _hv_state_find(s, from.addr, from.port, _HV_FIND_CREATE);
 				if(!state) continue;
 				uint64_t l = _hv_time_lock_acq(&state->recv_last_used);
@@ -1535,7 +1537,7 @@ static void* _hv_listen(void* _){
 			atomic_thread_fence(memory_order_acquire);
 			// Server open
 
-			atomic_store_explicit(&self.hazard, 0, memory_order_release);
+			//atomic_store_explicit(&self.hazard, 0, memory_order_release);
 		}*/
 		if(ev.type & X_EVENT_CLOSE){
 			hivemind_server_t* s = (hivemind_server_t*) ev.data.ptr;
