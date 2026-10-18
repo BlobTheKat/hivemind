@@ -123,8 +123,7 @@ static uint8_t* _hv_load_unsent(struct _hv_remote* state, uint8_t* p, uint8_t* e
 				_hv_free(p2, _hv_packet_allocsz(p2));
 				continue;
 			}
-			// Tagged like hivemind_send does, so acks can tell them apart from send order links
-			cur = (uintptr_t)p2 | 2;
+			cur = (uintptr_t)p2;
 			ring_buffer_set(&state->send_queue, i, &cur, sizeof(cur), true);
 			*last = p2; last = &p2->next;
 		}
@@ -321,7 +320,8 @@ static inline bool _hv_load(hivemind_server_t* s, uint8_t* data, size_t sz, hive
 				if(!(p = _hv_load_send_packet(p, end, &p2))) break;
 				if(p2){
 					// Slot points at whatever links to this packet
-					ring_buffer_push(&state->send_queue, &state->send_order_end, sizeof(struct _hv_send_packet*), true);
+					uintptr_t cur = (uintptr_t)state->send_order_end | 1;
+					ring_buffer_push(&state->send_queue, &cur, sizeof(uintptr_t), true);
 					p2->next = 0;
 					*state->send_order_end = p2;
 					state->send_order_end = &p2->next;
@@ -435,7 +435,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 				uint8_t* head = array_buffer_push_garbage(&b.buf, r*64+w*68+20);
 				memcpy(head, state->addr.bytes, 16);
 				_hv_write32(head+16, (uint32_t)(state->port|w<<16|r<<17)); head += 20; // Upper 14 bits reserved
-				size_t rsz = state->recv_queue.size, wsz = state->send_queue.size;
+				size_t rsz = state->recv_queue.size, wsz = ring_buffer_size(&state->send_queue);
 				if(r){
 					for(unsigned i = 0; i < 8; i++) _hv_write32(head+i*4, state->recv_key[i]);
 					_hv_write64(head+32, rl);
@@ -501,7 +501,7 @@ static inline void _hv_finish(hivemind_server_t* s, void (*pipe_finish)(void*,vo
 					uint64_t lo1 = lo0 - wsz/sizeof(struct _hv_send_packet*);
 					if(lo1>lo0) hi--;
 					while(ring_iterator_next(&it, &pp, sizeof(struct _hv_send_packet*), true)){
-						if((uintptr_t)pp & 2){
+						if(pp && !((uintptr_t)pp & 1)){
 							// Unsent, saved with its pipe below
 							_hv_write32(array_buffer_push_garbage(&b.buf, 4), _HV_SAVE_UNSENT);
 							continue;

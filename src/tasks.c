@@ -142,7 +142,8 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 			// The packets we passed are still in send order, restore their slots
 			replace = &state->send_order_start;
 			for(struct _hv_send_packet* p = packet0; p != packet; p = p->next){
-				ring_buffer_set(&state->send_queue, _hv_send_slot(state, p, bypass, base), &replace, sizeof(replace), true);
+				uintptr_t tagged = (uintptr_t)replace | 1;
+				ring_buffer_set(&state->send_queue, _hv_send_slot(state, p, bypass, base), &tagged, sizeof(tagged), true);
 				replace = &p->next;
 			}
 			state->rtt_gate_hi = 0; state->rtt_gate_lo = 4;
@@ -150,7 +151,8 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		}
 		sent += (packet->len4<<2)+48;
 		// Not in send order while being resent, acks for it are ignored until it's relinked
-		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &replace, sizeof(replace), true);
+		uintptr_t tagged = (uintptr_t)replace | 1;
+		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &tagged, sizeof(tagged), true);
 		packet = packet->next;
 		if(!packet || sent >= sendable_now){
 			if(!packet) state->send_order_end = &state->send_order_start;
@@ -160,7 +162,8 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 	}
 	if(packet){
 		replace = &state->send_order_start;
-		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &replace, sizeof(replace), true);
+		uintptr_t tagged = (uintptr_t)replace | 1;
+		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &tagged, sizeof(tagged), true);
 	}
 	state->send_unlocked_ref++;
 	fpacket = packet;
@@ -199,7 +202,8 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		replace = state->send_order_end;
 		base = _hv_send_base(state); // Acks may have shifted the queue while we were unlocked
 		while(packet){
-			ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &replace, sizeof(replace), true);
+			uintptr_t tagged = (uintptr_t)replace | 1;
+			ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &tagged, sizeof(tagged), true);
 			replace = &packet->next;
 			packet = *replace;
 		}
@@ -276,7 +280,7 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 		}
 		// Out of the pipe and not in send order yet. Clear its slot so an ack arriving while we're unlocked doesn't touch it
 		packet->next = 0;
-		struct _hv_send_packet** cleared = 0;
+		uintptr_t cleared = 0;
 		ring_buffer_set(&state->send_queue, i, &cleared, sizeof(cleared), true);
 		size_t sending = (packet->len4<<2)+48;
 		sendable_now = sending < sendable_now ? sendable_now-sending : 0;
@@ -302,7 +306,8 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 			goto end;
 		}
 		// The slot is still there: it holds 0, and acks only shift leading 1s off the front
-		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass), &state->send_order_end, sizeof(struct _hv_send_packet*), true);
+		uintptr_t tagged = (uintptr_t)&state->send_order_end | 1;
+		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass), &tagged, sizeof(tagged), true);
 		*state->send_order_end = packet;
 		state->send_order_end = &packet->next;
 		goto again;
@@ -325,7 +330,9 @@ static struct _hv_send_packet* _hv_send_slot_take(struct _hv_remote* state, size
 	if(!(*spacket = next)){
 		state->send_order_end = spacket;
 	}else{
-		ring_buffer_set(&state->send_queue, _hv_send_slot(state, next, bypass, *base), &spacket, sizeof(spacket), true);
+		// set next's prev
+		uintptr_t tagged = (uintptr_t)spacket | 1;
+		ring_buffer_set(&state->send_queue, _hv_send_slot(state, next, bypass, *base), &tagged, sizeof(tagged), true);
 	}
 	if(i == 0){
 		// Shift off this slot and any acked slots directly after it
@@ -339,8 +346,8 @@ static struct _hv_send_packet* _hv_send_slot_take(struct _hv_remote* state, size
 		ring_buffer_shift_discard(&state->send_queue, i, false);
 		*rsz -= j; *base += j; *i0 -= i;
 	}else{
-		spacket = (struct _hv_send_packet**)1;
-		ring_buffer_set(&state->send_queue, i, &spacket, sizeof(spacket), true);
+		uintptr_t acked_v = 1;
+		ring_buffer_set(&state->send_queue, i, &acked_v, sizeof(acked_v), true);
 	}
 	return p;
 }
@@ -365,10 +372,12 @@ static void _hv_ackd(struct _hv_remote* state, uint8_t* packet, unsigned plen, u
 				continue;
 			}else break;
 		}
-		struct _hv_send_packet** spacket;
-		ring_buffer_get(&state->send_queue, i, &spacket, sizeof(spacket), true);
+		uintptr_t v;
+		ring_buffer_get(&state->send_queue, i, &v, sizeof(v), true);
 		// 0: not in send order (in flight), 1: already acked, |2: not sent yet
-		if(!spacket || ((uintptr_t)spacket & 3)) goto next;
+		v--;
+		if(!v || (v & 1)) goto next;
+		struct _hv_send_packet** spacket = (struct _hv_send_packet**)v;
 
 		struct _hv_send_packet* p = _hv_send_slot_take(state, i, spacket, &rsz, &base, &i0, bypass);
 		assert((uint32_t)lo == _hv_lseqof(p, bypass));
@@ -879,11 +888,12 @@ static void _hv_ack_err_recvd(hivemind_server_t* s, struct _hv_remote* state, co
 	uintptr_t udata;
 	if(!reply){
 		size_t i = (size_t)d * sizeof(struct _hv_send_packet*);
-		struct _hv_send_packet** spacket;
-		ring_buffer_get(&state->send_queue, i, &spacket, sizeof(spacket), true);
-
-		if((uintptr_t)spacket == 1) reply = true;
-		else if(spacket && ((uintptr_t)spacket & 1)){
+		uintptr_t v;
+		ring_buffer_get(&state->send_queue, i, &v, sizeof(v), true);
+		if(!v || !((uintptr_t)v&1)) goto reply;
+		reply = true;
+		if(v > 1){
+			struct _hv_send_packet** spacket = (struct _hv_send_packet**)(v-1);
 			uint32_t base = _hv_send_base(state); uint64_t i0 = 0;
 			struct _hv_send_packet* p = _hv_send_slot_take(state, i, spacket, &rsz, &base, &i0, bypass);
 			assert((uint32_t)lo == _hv_lseqof(p, bypass));
@@ -892,10 +902,9 @@ static void _hv_ack_err_recvd(hivemind_server_t* s, struct _hv_remote* state, co
 		#if UINTPTR_MAX > UINT32_MAX
 			udata |= (uintptr_t)*(uint32_t*)(p->payload4+p->len4+6)<<32;
 		#endif
-			reply = true;
 		}
 	}
-	if(reply) _hv_send_ack_ext(state, lo, hi, true, bypass);
+	reply: if(reply) _hv_send_ack_ext(state, lo, hi, true, bypass);
 	l = _hv_internal_clock();
 	send:
 	_hv_time_lock_rel(&state->send_last_used, l);
