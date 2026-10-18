@@ -228,14 +228,10 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			if(argc >= 3){
 				if(info[2].IsString())
 					r.interface = interface_from_str(info[2].As<Napi::String>().Utf8Value().c_str());
-				if(argc >= 4 && info[3].IsObject()){
-					auto obj = info[3].As<Napi::Object>();
-					auto reflv = obj.Get("reflectionTest");
-					if(reflv.IsString()){
-						char str[IP_STR_MAX_LEN];
-						Napi_utf8_copy(reflv.As<Napi::String>(), str, IP_STR_MAX_LEN);
-						test = ip_from_string(str);
-					}
+				if(argc >= 4 && info[3].IsString()){
+					char str[IP_STR_MAX_LEN];
+					Napi_utf8_copy(info[3].As<Napi::String>(), str, IP_STR_MAX_LEN);
+					test = ip_from_string(str);
 				}
 			}
 		}

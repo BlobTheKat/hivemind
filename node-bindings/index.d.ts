@@ -27,15 +27,8 @@ export class HivemindServer{
 	static readonly QOS_SLOWER: 2
 	static readonly QOS_BACKGROUND: 3
 
-	listen(port: number, host?: string, interface?: string, options?: {
-		reflectionTest?: string,
-		path?: string,
-		revive?: (buf: ArrayBuffer) => any | undefined
-	}): Promise<void>
-	quit(options?: {
-		path?: string,
-		save: (data: any) => ArrayBuffer
-	}): Promise<void>
+	listen(port: number, host?: string, interface?: string, reflectionTest?: string): Promise<void>
+	quit(): Promise<void>
 
 	createPipe(data: (buf: ArrayBuffer) => any | { onMsg: (buf: ArrayBuffer) => any }, qos: 0 | 1 | 2 | 3): ArrayBuffer
 	deletePipe(pipe: ArrayBuffer): void
