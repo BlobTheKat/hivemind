@@ -6,12 +6,6 @@
 #include <mutex>
 #include "utils.hh"
 #include <hivemind.h>
-#ifdef _WIN32
-#include <processthreadsapi.h>
-#define sched_yield() SwitchToThread()
-#else
-#include <sched.h>
-#endif
 
 #define SECOND_US 1000000
 
@@ -21,7 +15,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		CLOSED = 0,
 		OPENING = 16, OPENING_READY,
 		OPEN = 32,
-		CLOSING = 48, CLOSING_WAITING_JS_CALLBACK, CLOSING_WAITING_HV_CALLBACK, CLOSING_READY
+		CLOSING = 48, CLOSING_READY
 	};
 	struct PipeMeta{
 		Napi::FunctionReference cb;
@@ -53,7 +47,6 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		s->msg_lock.unlock();
 		Napi::HandleScope _(s->Env());
 		if(state == State::OPENING_READY){
-			atomic_thread_fence(memory_order_acquire);
 			s->state = State::OPEN;
 			s->on_open_close->Resolve(s->Env().Undefined());
 			s->on_open_close.destruct();
@@ -70,32 +63,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			}
 			hivemind_packet_free(item.data);
 		}
-		next:
-		if(state == State::CLOSING_WAITING_JS_CALLBACK){
-			atomic_thread_fence(memory_order_acquire);
-			Napi::HandleScope _(s->Env());
-			auto v = s->revive_save->Call({s->user_data.Value()});
-			if(v.IsTypedArray()){
-				auto v2 = v.As<Napi::TypedArrayOf<uint8_t>>();
-				s->save_data = v2.Data(); s->save_size = v2.ByteLength();
-			}else if(v.IsArrayBuffer()){
-				auto v2 = v.As<Napi::ArrayBuffer>();
-				s->save_data = v2.Data(); s->save_size = v2.ByteLength();
-			}else if(v.IsDataView()){
-				auto v2 = v.As<Napi::ArrayBuffer>();
-				s->save_data = v2.Data(); s->save_size = v2.ByteLength();
-			}else{
-				s->save_size = SIZE_MAX;
-			}
-			s->state.store(State::CLOSING_WAITING_HV_CALLBACK, release);
-			do{
-				sched_yield();
-				state = s->state.load(relaxed);
-			}while(state == State::CLOSING_WAITING_HV_CALLBACK);
-			goto next;
-		}
 		if(state == State::CLOSING_READY){
-			atomic_thread_fence(memory_order_acquire);
 			s->state.store(State::CLOSED, relaxed);
 			uv_close((uv_handle_t*)&s->async_handle, &HivemindServerJS::handle_closed);
 			s->on_open_close->Resolve(s->Env().Undefined());
@@ -108,31 +76,8 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		s->state.store(State::CLOSING_READY, release);
 		if(send) uv_async_send(&s->async_handle);
 	}
-	static void* revive_pipe(void* s_, const uint8_t* data, size_t size){
-		HivemindServerJS* s = (HivemindServerJS*)s_;
-		auto v = Napi::ArrayBuffer::New(s->Env(), (uint8_t*)data, size);
-		auto udata = s->revive_save->Call({v});
-		v.Detach();
-		if(!udata.IsFunction()) return 0;
-		return new PipeMeta{ Napi::Persistent(udata.As<Napi::Function>()), 1 };
-	}
 	static void free_pipe(void* s_, void* p_){
-		HivemindServerJS* s = (HivemindServerJS*)s_;
-		PipeMeta* p = (PipeMeta*)p_;
-		s->user_data = std::move(p->cb);
-		bool send = s->state.load(relaxed) == State::CLOSING;
-		s->state.store(State::CLOSING_WAITING_JS_CALLBACK, release);
-		if(send) uv_async_send(&s->async_handle);
-		State state;
-		do{
-			sched_yield();
-			state = s->state.load(relaxed);
-		}while(state != State::CLOSING_WAITING_HV_CALLBACK);
-		atomic_thread_fence(memory_order_acquire);
-		if(s->save_size != SIZE_MAX){
-			memcpy(hivemind_request_buffer(s->save_size), s->save_data, s->save_size);
-		}
-		delete p;
+		delete (PipeMeta*)p_;
 	}
 	static Napi::Value PipeToString(const Napi::CallbackInfo& info){
 		if(info.Length() != 1 || !info[0].IsArrayBuffer()) err: {
@@ -188,7 +133,6 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 	uv_async_t async_handle;
 	Napi::AsyncContext async_context;
 	slot<Napi::Promise::Deferred> on_open_close;
-	slot<Napi::FunctionReference> revive_save;
 	hivemind_server_t server_;
 	public:
 	HivemindServerJS(const Napi::CallbackInfo& info) : Napi::ObjectWrap<HivemindServerJS>(info), async_context(info.Env(), "Hivemind"){
@@ -275,7 +219,6 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		remote_t r;
 		r.port = (uint16_t) info[0].As<Napi::Number>().Uint32Value();
 		ip_addr_t test = HIVEMIND_WAN_V4;
-		std::string path;
 		if(argc >= 2){
 			if(info[1].IsString()){
 				char str[IP_STR_MAX_LEN];
@@ -293,16 +236,6 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 						Napi_utf8_copy(reflv.As<Napi::String>(), str, IP_STR_MAX_LEN);
 						test = ip_from_string(str);
 					}
-					auto pathv = obj.Get("path");
-					if(pathv.IsString()){
-						auto fnv = obj.Get("revive");
-						if(!fnv.IsFunction()){
-							Napi::TypeError::New(info.Env(), "Failed to execute 'listen' on 'HivemindServer': 'option' parameter 'revive' must be supplied and must be a function if 'path' is supplied").ThrowAsJavaScriptException();
-							return info.Env().Undefined();
-						}
-						this->revive_save.construct(Napi::Persistent(fnv.As<Napi::Function>()));
-						path = pathv.As<Napi::String>().Utf8Value();
-					}
 				}
 			}
 		}
@@ -314,7 +247,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 		int err2 = uv_async_init(loop, &async_handle, async_cb);
 		assert(!err2, "uv_async_init");
 		async_handle.data = this;
-		if(!hivemind_start(&server_, r, test, path.size() ? path.c_str() : 0, path.size() ? (hivemind_pipe_restore_fn_t) &HivemindServerJS::revive_pipe : 0)){
+		if(!hivemind_start(&server_, r, test)){
 			uv_unref((uv_handle_t*)&async_handle);
 			Napi::Error::New(info.Env(), "Failed to execute 'listen' on 'HivemindServer': could not bind to address").ThrowAsJavaScriptException();
 			return info.Env().Undefined();
@@ -410,7 +343,7 @@ class HivemindServerJS : public Napi::ObjectWrap<HivemindServerJS>{
 			return info.Env().Undefined();
 		}
 		this->state.store(State::CLOSING, relaxed);
-		hivemind_quit(&server_, (hivemind_generic_fn_t) HivemindServerJS::on_done, 0, (hivemind_pipe_finish_fn_t) HivemindServerJS::free_pipe);
+		hivemind_quit(&server_, (hivemind_generic_fn_t) HivemindServerJS::on_done, (hivemind_pipe_finish_fn_t) HivemindServerJS::free_pipe);
 		// Beyond this part it is not possible to receive more messages
 		on_open_close.construct(Napi::Promise::Deferred::New(info.Env()));
 		return on_open_close->Promise();

@@ -262,18 +262,6 @@ struct _hv_pipe{
 	void* udata;
 };
 
-struct _hv_open_close_data{
-	hivemind_generic_fn_t cb;
-	union{
-		hivemind_pipe_restore_fn_t restore_cb;
-		hivemind_pipe_finish_fn_t finish_cb;
-	};
-#if _HV_ALLOCATOR_SIZED
-	unsigned filenamesz;
-#endif
-	char filename[];
-};
-
 struct _hv_vq{
 	atomic(size_t) ref;
 	vqueue_t q;
@@ -312,7 +300,8 @@ struct hivemind_server{
 	hivemind_on_pipe_msg_fn_t on_msg;
 	atomic(size_t) pipes_heap_i, deleted_pipes;
 	atomic(uintptr_t)* pipes_data;
-	struct _hv_open_close_data* oc;
+	hivemind_generic_fn_t open_close_cb;
+	hivemind_pipe_finish_fn_t finish_cb;
 	atomic(hivemind_server_t*) next, *prevp;
 	x_socket_t handle;
 	uint32_t first_id[5];

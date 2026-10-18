@@ -1,6 +1,5 @@
 #include "dbg.h"
-#include "internals.c"
-#include "save.c"
+#include "plumbing.c"
 #include <stdint.h>
 #ifndef _WIN32
 	#include <signal.h>
@@ -1691,8 +1690,6 @@ static void* _hv_listen(void* _){
 		if(ev.type & X_EVENT_CLOSE){
 			hivemind_server_t* s = (hivemind_server_t*) ev.data.ptr;
 			hivemind_server_t* expected = s;
-			struct _hv_open_close_data* oc = s->oc;
-			if(!oc) continue;
 			atomic_compare_exchange_strong_explicit(&_hv_meta.read_help_requested, &expected, 0, memory_order_relaxed, memory_order_relaxed);
 			lock_acquire(&_hv_meta.threads_lock, 1);
 			hivemind_server_t* next = atomic_load_explicit(&s->next, memory_order_relaxed);
@@ -1710,18 +1707,12 @@ static void* _hv_listen(void* _){
 			// Server should be unreachable after this
 
 			// Fearless freeing!
-			_hv_finish(s, oc->finish_cb, oc->filename[0] ? oc->filename : 0);
-			void (*on_close)(void*) = oc->cb;
-		#if _HV_ALLOCATOR_SIZED
-			_hv_free(oc, sizeof(struct _hv_open_close_data) + oc->filenamesz);
-		#else
-			_hv_free(oc, 0);
-		#endif
+			_hv_finish(s);
 			
 			// Safe to teardown
 			x_socket_free(s->handle);
 			s->handle = X_SOCKET_INVALID;
-			if(on_close) on_close(s->udata);
+			if(s->open_close_cb) s->open_close_cb(s->udata);
 		}
 	}
 	free(packet);

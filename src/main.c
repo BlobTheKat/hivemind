@@ -15,7 +15,7 @@ void hivemind_init(hivemind_server_t* s, const uint8_t master_key[32], hivemind_
 #endif
 	for(unsigned i = 0; i < 8; i++) s->master_key[i] = (uint32_t)master_key[i<<2]|(uint32_t)master_key[i<<2|1]<<8|(uint32_t)master_key[i<<2|2]<<16|(uint32_t)master_key[i<<2|3]<<24;
 }
-bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test, const char* from, hivemind_pipe_restore_fn_t pipe_restore){
+bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test){
 	x_socket_t sock = x_udp_bound(where);
 	if(sock == X_SOCKET_INVALID) return false;
 	s->handle = sock;
@@ -34,22 +34,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 	if(!x_udp_opts(sock, 131072 * 1024, 131072 * 1024))
 		goto err;
 	
-	if(from){
-		x_file_t f = x_open(from, X_FILE_READONLY | X_FILE_SEQUENTIAL | X_FILE_READ_THROUGH);
-		if(f == X_FILE_INVALID) goto restore_failed;
-		x_remove(from);
-		size_t sz = x_getsize(f);
-		bool success = false;
-		if(sz >= _HV_SAVE_HEADER_SZ){
-			uint8_t* data = (uint8_t*)_hv_alloc(sz);
-			if(x_read(f, data, 0, sz) == sz)
-				success = _hv_load(s, data, sz, pipe_restore);
-			_hv_free(data, sz);
-		}
-		x_close(f);
-		if(!success) goto restore_failed;
-	}else restore_failed: _hv_nalloc_id(s, s->first_id);
-
+	_hv_nalloc_id(s, s->first_id);
 	if(s->network_bypass_prefix_v4 < 48 || s->network_bypass_prefix_v6 < 144){
 		atomic_init(&s->vq_flag, 1);
 		char name[56]; _hv_vq_name(name, s->addr, le16toh(s->port_le));
@@ -85,7 +70,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 }
 
 uint8_t* hivemind_packet_detach(const uint8_t* p){
-	struct _hv_tls_packet_detach* d = tls.packet_detach;
+	struct _hv_tls_packet_detach* d = tls_packet_detach;
 	struct _hv_vq* b = d->vq_block;
 	if(b){
 		*(struct _hv_vq**)(p - 20) = b;
@@ -119,7 +104,7 @@ void hivemind_packet_free(const uint8_t* p){
 	free((void*)p);
 }
 void hivemind_pipe_unlock(void){
-	struct _hv_tls_packet_detach* d = tls.packet_detach;
+	struct _hv_tls_packet_detach* d = tls_packet_detach;
 	if(d->pipe_lock) lock_release(d->pipe_lock, 1), d->pipe_lock = 0;
 }
 
@@ -368,17 +353,9 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	if(num_packets > 8) _hv_free(packets, num_packets * sizeof(struct _hv_send_packet*));
 }
 
-void hivemind_quit(hivemind_server_t* s, hivemind_generic_fn_t on_close, const char* to, hivemind_pipe_finish_fn_t pipe_finish){
-	size_t to_len = to ? strlen(to) + 1 : 1;
-	struct _hv_open_close_data* oc = _hv_alloc(sizeof(struct _hv_open_close_data) + to_len);
-	oc->cb = on_close;
-	oc->finish_cb = pipe_finish;
-#if _HV_ALLOCATOR_SIZED
-	oc->filenamesz = to_len;
-#endif
-	if(to_len>1) memcpy(oc->filename, to, to_len+1);
-	else oc->filename[0] = '\0';
-	s->oc = oc;
+void hivemind_quit(hivemind_server_t* s, hivemind_generic_fn_t on_close, hivemind_pipe_finish_fn_t pipe_finish){
+	s->open_close_cb = on_close;
+	s->finish_cb = pipe_finish;
 	x_socket_t h = s->handle;
 	if(atomic_load_explicit(&s->vq_flag, memory_order_acquire)){
 		vqueue_post(&s->vq_block->q, vqueue_alloc(&s->vq_block->q, 0));

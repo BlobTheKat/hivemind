@@ -4,16 +4,12 @@
 #define CRC64_IMPL
 #include "crc64.h"
 
-struct _hv_tls_buf_being_built{
-	array_buffer_t buf;
-	size_t sz0;
-};
 struct _hv_tls_packet_detach{
 	size_t packet_on_heap;
 	struct _hv_vq* vq_block;
 	lock_t* pipe_lock;
 };
-thread_local union{ struct _hv_tls_packet_detach* packet_detach; struct _hv_tls_buf_being_built* buf_being_built; } tls;
+thread_local struct _hv_tls_packet_detach* tls_packet_detach;
 static bool _hv_pipeid_in_range(const uint32_t test[5], const uint32_t b0[5], const uint32_t b1[5]){
 	uint64_t tn = (uint64_t)le32toh(test[0])<<24|((uint64_t)le32toh(test[1])&0xffffff);
 	uint64_t t0 = (uint64_t)le32toh(b0[0])<<24|((uint64_t)le32toh(b0[1])&0xffffff);
@@ -65,7 +61,7 @@ static void* _hv_pipe_acquire(hivemind_server_t* s, const uint32_t id[5]){
 static inline void _hv_fire_pipe_end(hivemind_server_t* s, void* pipe, const uint8_t* data, size_t len, struct _hv_tls_packet_detach* d){
 	struct _hv_pipe* p = (struct _hv_pipe*) pipe;
 	d->pipe_lock = &p->ref;
-	tls.packet_detach = d;
+	tls_packet_detach = d;
 	s->on_msg(s->udata, p->udata, data, len);
 	if(d->pipe_lock) lock_release(d->pipe_lock, 1);
 	shared_lock_release(&s->pipes_lock);
@@ -579,3 +575,66 @@ static inline void _hv_link_unsent_ack(struct _hv_remote* state){
 }
 
 #define CHACHA20_INIT {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574} // "expand 32-byte k"
+
+static inline void _hv_finish(hivemind_server_t* s){
+	size_t pipe_top = atomic_load_explicit(&s->pipes_heap_i, memory_order_relaxed);
+	size_t pipec = pipe_top - atomic_load_explicit(&s->deleted_pipes, memory_order_relaxed);
+
+	struct _hv_pipe* pheap = (struct _hv_pipe*)(s->pipes_data + ((1ull<<s->pipes_bucket_exp)&-2ull));
+	for(size_t i = 0; i < pipe_top; i++){
+		struct _hv_pipe* p = pheap+i;
+		if(atomic_load_explicit(&p->next, memory_order_relaxed)&1ull){
+			// deleted
+			pipec++;
+			continue;
+		}
+		if(s->finish_cb) s->finish_cb(s->udata, p->udata);
+	}
+	assert(pipec == pipe_top);
+	free(s->pipes_data);
+	atomic_init(&s->pipes_heap_i, 0);
+	atomic_init(&s->deleted_pipes, 0);
+	s->pipes_data = 0;
+	s->pipes_bucket_exp = 0;
+
+
+	size_t buckets = (1<<s->buckets_exp)>>1;
+	struct _hv_remote** r = s->remote_buckets;
+	if(buckets < 2) r = (struct _hv_remote**) &s->remote_buckets;
+	uint64_t t = _hv_internal_clock(), life = s->message_timeout;
+	for(size_t i = 0; i < buckets; i++){
+		struct _hv_remote* state = r[i];
+		while(state){
+			if(state->bypass_type & 2){
+				struct _hv_remote_vq* state_vq = (struct _hv_remote_vq*)state;
+				vqueue_close(&state_vq->q);
+				assert(!state_vq->ref);
+				struct _hv_remote* n = state->next;
+				free(state);
+				state = n;
+				continue;
+			}
+			uint64_t rl = _hv_time_lock_acq(&state->recv_last_used);
+			uint64_t sl = _hv_time_lock_acq(&state->send_last_used);
+			assert(!state->recv_unlocked_ref && !state->send_unlocked_ref);
+			state->ack_coal_i = 0;
+			bool bypass = state->bypass_type == 1;
+
+			_hv_remote_cleanup_recv(state, bypass);
+			_hv_remote_cleanup_send(state);
+			// Signal to undrained/unsent_ack that this state is no longer needed and should be freed once done
+			state->prevp = 0;
+			struct _hv_remote* n = state->next;
+			if(!state->undrained_next && !state->unsent_ack_next){
+				free(state);
+			}else{
+				_hv_time_lock_rel(&state->send_last_used, 1);
+				_hv_time_lock_rel(&state->recv_last_used, 1);
+			}
+			state = n;
+		}
+	}
+	if(s->buckets_exp >= 2) free(s->remote_buckets);
+	s->remote_buckets = 0; s->remote_count = 0;
+	s->buckets_exp = 0;
+}
