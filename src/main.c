@@ -251,7 +251,7 @@ void hivemind_send(hivemind_server_t* s, const hivemind_pipe_t* to, const uint8_
 	}
 	seq_lo = state->send_seq_lo; seq_hi = state->send_seq_hi;
 	if((state->send_seq_lo = seq_lo+num_packets) < seq_lo) state->send_seq_hi = seq_hi+1;
-	pipe_last = _hv_find_pipe_last(state, to, (uint32_t)seq_lo, &plch);
+	pipe_last = _hv_find_pipe_last(state, to->id, le16toh(to->mtu_le), (uint32_t)seq_lo, &plch);
 	if(plen) assert(!pipe_last); // if(kex)
 	if(!rsz){
 		state->rtt_gate_hi = 0;
