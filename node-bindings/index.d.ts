@@ -30,7 +30,7 @@ export class HivemindServer{
 	listen(port: number, host?: string, interface?: string, reflectionTest?: string): Promise<void>
 	quit(): Promise<void>
 
-	createPipe(data: (buf: ArrayBuffer) => any | { onMsg: (buf: ArrayBuffer) => any }, qos: 0 | 1 | 2 | 3): ArrayBuffer
+	createPipe(data: (buf: ArrayBuffer) => any, qos: 0 | 1 | 2 | 3): ArrayBuffer
 	deletePipe(pipe: ArrayBuffer): void
 
 	send(pipe: ArrayBuffer, msg: Uint8Array | ArrayBuffer | DataView): void
