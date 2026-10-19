@@ -55,7 +55,7 @@ static inline uint64_t _hv_mix64_addr(ip_addr_t addr, uint16_t port){
 
 struct _hv_send_packet{
 	struct _hv_send_packet* next; // can be tagged before its in send order linked list (but not after)
-	uint64_t len4:14, resent:4, first:1, kex:1, has_err_fb:1, time_lo:43;
+	uint64_t len4:14, resent:1, first:1, kex:1, has_err_fb:1, time_lo:46;
 	uint32_t payload4[];
 };
 
@@ -95,15 +95,6 @@ struct _hv_send_pipe{
 	struct _hv_send_packet *start, **end; // start can be tagged
 };
 
-// Errors (slot value 2 in recv_queue) sent back with ack_err that the sender hasn't confirmed with ack_err_ack yet
-struct _hv_ack_err{ uint32_t seq, reason; };
-struct _hv_ack_err_q{
-	uint32_t n, cap;
-	// Resend backoff: resent every 4<<gen ticks
-	uint16_t tick; uint8_t gen;
-	struct _hv_ack_err ent[];
-};
-
 struct _hv_remote{
 	// Field order is specific and to avoid an entire cache line of wasted padding and reduce false sharing
 	// This layout is optimized for 64 bit pointers and size_t.
@@ -130,7 +121,7 @@ struct _hv_remote{
 	uint32_t send_unlocked_ref;
 	uint32_t send_seq_hi; uint64_t send_seq_lo; // Protocol sequence numbers
 	// Linked list of undrained queues
-	struct _hv_remote* undrained_next;
+	atomic(struct _hv_remote*) undrained_next;
 	// send_key is moved to the first cache line to save 1 cache line on the struct size
 	// It's infrequently written so this should be fine performance-wise
 	
@@ -183,7 +174,7 @@ struct _hv_remote{
 	uint64_t key_derived_when;
 	// ACK coalescing stuff
 	// Linked list of all remotes with unsent acks
-	struct _hv_remote* unsent_ack_next;
+	atomic(struct _hv_remote*) unsent_ack_next;
 	// ---
 	uint32_t ack_coal_buf[15];
 	// 4B left
@@ -196,7 +187,7 @@ struct _hv_remote{
 	// ack_coal_tim0 = _hv_internal_clock() time for first ack, used to encode `dt`s in ack_coal_buf
 	uint64_t ack_coal_tim0:56, ack_coal_i:8;
 	// Buffer of coalesced acks. Up to 16 acks can be coalesced together (the 16th is stored in `_hv_queue_ack`'s stack when the buffer is found to be full). When the buffer is not full, the last element in this buffer is the low 32 bits of the ack's base sequence. All other values are packed `diff`s + `dt`s.
-	// 8B left
+	size_t qd_bytes4;
 
 	alignas(16) char unused_[16];
 };
@@ -279,6 +270,10 @@ struct hivemind_server{
 	uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 	void* udata;
 	uint64_t message_timeout;
+	size_t backpressure_limit;
+	hivemind_on_pipe_msg_fn_t on_msg;
+	hivemind_generic_fn_t open_close_cb;
+	hivemind_pipe_finish_fn_t finish_cb;
 	uint32_t master_key[8];
 #ifdef __SIZEOF_INT128__
 	union{
@@ -297,11 +292,8 @@ struct hivemind_server{
 	shared_lock_t state_lock, pipes_lock;
 	size_t remote_count;
 	struct _hv_remote** remote_buckets;
-	hivemind_on_pipe_msg_fn_t on_msg;
 	atomic(size_t) pipes_heap_i, deleted_pipes;
 	atomic(uintptr_t)* pipes_data;
-	hivemind_generic_fn_t open_close_cb;
-	hivemind_pipe_finish_fn_t finish_cb;
 	atomic(hivemind_server_t*) next, *prevp;
 	x_socket_t handle;
 	uint32_t first_id[5];
@@ -462,4 +454,5 @@ static void _hv_remote_cleanup_send(struct _hv_remote* state){
 	array_buffer_destroy(&state->pipes_with_unsent);
 	memset(&state->pipes_with_unsent, 0, sizeof(state->pipes_with_unsent));
 	hash_table_set_rank(&state->pipes_with_unsent_b, 0);
+	state->qd_bytes4 = 0;
 }

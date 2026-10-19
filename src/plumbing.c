@@ -569,9 +569,9 @@ static_assert(alignof(thread_t) <= alignof(max_align_t));
 
 // Make sure the remote is visited by the ack tick (expects the recv lock held)
 static inline void _hv_link_unsent_ack(struct _hv_remote* state){
-	if(state->unsent_ack_next) return;
+	if(atomic_load_explicit(&state->unsent_ack_next, memory_order_relaxed)) return;
 	struct _hv_remote* n = atomic_load_explicit(&_hv_meta.unsent_ack, memory_order_acquire);
-	retry: state->unsent_ack_next = n;
+	retry: atomic_store_explicit(&state->unsent_ack_next, n, memory_order_relaxed);
 	if(!atomic_compare_exchange_weak_explicit(&_hv_meta.unsent_ack, &n, state, memory_order_acq_rel, memory_order_relaxed)) goto retry;
 	x_event_queue_wake(&_hv_meta.queue, _HV_SEND_TICK);
 }
@@ -635,7 +635,7 @@ static inline void _hv_finish(hivemind_server_t* s){
 			// Signal to undrained/unsent_ack that this state is no longer needed and should be freed once done
 			state->prevp = 0;
 			struct _hv_remote* n = state->next;
-			if(!state->undrained_next && !state->unsent_ack_next){
+			if(!atomic_load_explicit(&state->undrained_next, memory_order_relaxed) && !atomic_load_explicit(&state->unsent_ack_next, memory_order_relaxed)){
 				free(state);
 			}else{
 				_hv_time_lock_rel(&state->send_last_used, 1);

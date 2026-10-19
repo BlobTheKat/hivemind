@@ -66,7 +66,7 @@ static void _hv_remove_unused(hivemind_server_t* s, uint64_t t){
 			uint64_t r = _hv_time_lock_acq(&state->recv_last_used);
 			uint64_t s = _hv_time_lock_acq(&state->send_last_used);
 			t = _hv_internal_clock();
-			if(state->send_unlocked_ref || state->recv_unlocked_ref || state->undrained_next || state->unsent_ack_next || (r-t+1)>>1 <= c || s-t <= c){
+			if(state->send_unlocked_ref || state->recv_unlocked_ref || atomic_load_explicit(&state->undrained_next, memory_order_relaxed) || atomic_load_explicit(&state->unsent_ack_next, memory_order_relaxed) || (r-t+1)>>1 <= c || s-t <= c){
 				_hv_time_lock_rel(&state->recv_last_used, r);
 				_hv_time_lock_rel(&state->send_last_used, s);
 				continue;
@@ -95,6 +95,237 @@ static void _hv_send_packet(struct _hv_remote* state, struct _hv_send_packet* pa
 	bool send_success = x_udp_send(_hv_state_handle(state), (remote_t){state->addr, state->port, 0, 0}, (char*)packet->payload4, len);
 	soft_assert(send_success);
 	packet->time_lo = now;
+}
+
+// Undo the encryption of a sent (non bypass) packet with full sequence number [hi,lo], restoring the plaintext hivemind_send built. Mirrors the receiver in _hv_poll
+// Header words (tag/seq) are left as they are, the caller rewrites them
+static void _hv_unencrypt_packet(uint32_t chacha_in[16], uint64_t lo, uint32_t hi, struct _hv_send_packet* p){
+	chacha_in[13] = (uint32_t)lo; chacha_in[14] = (uint32_t)(lo>>32); chacha_in[15] = hi;
+	unsigned plen = p->len4, j = 5, tail = 0;
+	if(p->first){
+		uint32_t d[16]; memcpy(d, chacha_in, 64);
+		d[12] = 0xffffffff;
+		ChaCha20_block(d);
+		p->payload4[plen-1] ^= d[15];
+		if(p->kex){
+			p->payload4[plen-2] ^= d[14];
+			j = 9; tail = 2;
+		}else if(le32toh(p->payload4[plen-1])>>16 == 0xffff){
+			// Long encoding
+			p->payload4[plen-2] ^= d[14];
+			p->payload4[plen-3] ^= d[13];
+			tail = 3;
+		}else tail = 1;
+		for(unsigned i = 8; i < 13; i++, j++) p->payload4[j] ^= d[i];
+	}
+	unsigned blocks = plen > j+tail ? (plen-j-tail)>>4 : 0;
+	chacha_in[12] = 0;
+	if(blocks) ChaCha20_block_xor(chacha_in, (uint8_t*)(p->payload4+j), blocks);
+}
+
+// Header size (in dwords, including the pipe id) of a message's first packet
+#define _hv_first_header(p, bypass) ((p)->kex ? ((bypass) ? 9 : 14) : ((bypass) ? 8 : 10))
+
+// Message length and trailer size (in dwords) of a plaintext first packet, as encoded by hivemind_send
+static inline size_t _hv_first_len(struct _hv_send_packet* p, bool bypass, unsigned* tail){
+	const uint32_t* t = p->payload4 + p->len4;
+	if(p->kex){
+		*tail = 2;
+		return (size_t)le32toh(t[-2])<<16 | (le32toh(t[-1])&0xffff);
+	}
+	uint32_t x = le32toh(t[-1]);
+	if(x>>16 == 0xffff){
+		*tail = 3;
+		return (size_t)le32toh(t[-2])<<16 | (x&0xffff);
+	}
+	*tail = 1;
+	return bypass ? x&0xffff : x>>16;
+}
+
+// Rewrite the dependency of a (non kEX) first packet now sitting at sequence `self`
+static inline void _hv_set_pipe_last(struct _hv_send_packet* p, uint32_t self, uint32_t pipe_last, bool bypass){
+	uint32_t* t = p->payload4 + p->len4;
+	uint32_t x = le32toh(t[-1]);
+	if(x>>16 == 0xffff){
+		t[-3] = htole32(pipe_last);
+		return;
+	}
+	uint32_t diff = self - pipe_last;
+	// Doesn't fit the short encoding and we can't grow the packet, drop the dependency instead
+	if(diff > (bypass ? 0xfe : 0xffff)) diff = 0;
+	t[-1] = htole32(bypass ? (x&0xffff) | diff<<16 : (x&0xFFFF0000) | diff);
+}
+
+// QoS of a pipe in a (detached) pipes_with_unsent table, 0 if it isn't there
+static unsigned _hv_unsent_qos(const hash_table_t* b, array_buffer_t* pipes, const uint32_t id[5]){
+	char* data = array_buffer_data(pipes);
+	for(size_t pos = (size_t)hash_table_find(b, _hv_send_pipe_hash(id)); pos;){
+		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data + pos) - 1;
+		if(!memcmp(ps->id, id, 20)) return (unsigned)(ps->queued >> (sizeof(size_t)*CHAR_BIT-2));
+		pos = (size_t)ps->next;
+	}
+	return 0;
+}
+
+// Turn the first message of the queue (chain starting at f, plaintext) into a kEX message, the same way hivemind_send starts a new connection
+// A non kEX first packet's data is moved into a new continuation packet so neither packet grows past the original's size (and therefore the MTU)
+static struct _hv_send_packet* _hv_kexify(hivemind_server_t* s, struct _hv_remote* state, struct _hv_send_packet* f, const uint32_t pipeid[5], bool bypass){
+	unsigned khdr = bypass ? 9 : 14;
+	unsigned hdr = _hv_first_header(f, bypass), chdr = bypass ? 3 : 5, tail;
+	size_t len = _hv_first_len(f, bypass, &tail);
+	unsigned data = f->len4 > hdr+tail ? f->len4-hdr-tail : 0;
+	size_t fb = f->has_err_fb ? 20+sizeof(uintptr_t) : 0;
+	struct _hv_send_packet* k = (struct _hv_send_packet*)_hv_alloc(sizeof(struct _hv_send_packet) + 4 * (khdr+2) + (data ? 0 : fb));
+	k->len4 = khdr+2; k->first = k->kex = 1; k->resent = 0; k->time_lo = 0;
+	k->has_err_fb = !data && f->has_err_fb;
+	memcpy(k->payload4+khdr-5, pipeid, 20);
+	k->payload4[khdr+1] = htole32(len&0xffff);
+	k->payload4[khdr] = htole32(len>>16);
+	struct _hv_send_packet* tail_p = k;
+	if(data){
+		struct _hv_send_packet* c = (struct _hv_send_packet*)_hv_alloc(sizeof(struct _hv_send_packet) + 4 * (chdr+data) + fb);
+		c->len4 = chdr+data; c->first = c->kex = 0; c->resent = 0; c->time_lo = 0;
+		c->has_err_fb = f->has_err_fb;
+		memcpy(c->payload4+chdr, f->payload4+hdr, data<<2);
+		k->next = c; tail_p = c;
+	}
+	// Error feedback lives after the last packet's payload
+	if(fb) memcpy(tail_p->payload4+tail_p->len4, f->payload4+f->len4, fb);
+	tail_p->next = 0;
+	_hv_free(f, _hv_packet_allocsz(f));
+	f = k;
+	// Fresh kEX, the old one is either rejected or too old
+	if(bypass){
+		uint64_t shash = _hv_mix64_addr(s->addr, le16toh(s->port_le)), dhash = _hv_mix64_addr(state->addr, state->port);
+		f->payload4[0] = htole32(shash); f->payload4[1] = htole32(shash>>32);
+		f->payload4[2] = htole32(dhash); f->payload4[3] = htole32(dhash>>32);
+		_hv_nalloc_id(s, state->send_key+3);
+		state->send_key[2] = 0;
+		state->send_crcinit = _hv_alloc_id_short(s);
+	}else _hv_ram_packed_kex(s, state, f->payload4+4);
+	return f;
+}
+
+static inline void _hv_fire_dropped(hivemind_server_t* s, uint32_t* dropped, size_t count, unsigned reason){
+	while(count -= 20+sizeof(uintptr_t)){
+		struct _hv_tls_packet_detach d = {.packet_on_heap = SIZE_MAX};
+		uintptr_t udata = dropped[5];
+	#if UINTPTR_MAX > UINT32_MAX
+		udata |= (uintptr_t)dropped[6] << 32;
+	#endif
+		_hv_fire_pipe(s, dropped, (uint8_t*)udata, (SIZE_MAX-63) | reason, &d);
+		dropped += 6 + (UINTPTR_MAX > UINT32_MAX);
+	}
+}
+
+// ACK ERR: the remote has no state for us. Requeue (as unsent, renumbered from a new kEX) every complete message whose pipe is in [pipe0, pipe1]
+// Messages out of that range, or with any packet already acked, are dropped into `dropped`. The caller must pass it to _hv_fire_dropped once the send lock is released
+// Expects the send lock held exclusively (no unlocked refs). Returns true if nothing was requeued and the next hivemind_send should start a new kEX
+static bool _hv_filter_send_queue(hivemind_server_t* s, struct _hv_remote* state, uint32_t pipe0[5], uint32_t pipe1[5], bool first, bool bypass, array_buffer_t* dropped){
+	size_t rsz = ring_buffer_size(&state->send_queue) / sizeof(struct _hv_send_packet*);
+	uint64_t lo = state->send_seq_lo - rsz; uint32_t hi = state->send_seq_hi;
+	if(lo > state->send_seq_lo) hi--;
+	// An ack err for the kEX is only meaningful while the kEX is still at the front of the queue
+	if(first && (lo || hi)) return false;
+
+	uint32_t chacha_in[16] = CHACHA20_INIT;
+	if(!bypass) memcpy(chacha_in+4, state->send_key, 32);
+
+	// Pass 1: collect the packets of the messages to keep (plaintext, in order), drop everything else
+	array_buffer_t kept = {0};
+	size_t need = 0, mstart = 0;
+	// 0 while the message being walked is kept, otherwise why it's being dropped. Leading continuations belong to a message whose start was already acked
+	ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, SIZE_MAX);
+	uintptr_t v;
+	ring_buffer_t old_send_queue = state->send_queue;
+	state->send_queue = (ring_buffer_t){};
+	state->send_order_start = 0;
+	state->send_order_end = &state->send_order_start;
+	array_buffer_t old_pipes = state->pipes_with_unsent;
+	hash_table_t old_b = state->pipes_with_unsent_b;
+	state->pipes_with_unsent = (array_buffer_t){};
+	state->pipes_with_unsent_b = (hash_table_t){};
+	state->qd_bytes4 = 0;
+	
+	array_buffer_t to_free = {};
+	uint32_t new_seq = 0;
+	if(first){
+		ring_iterator_skip(&it, sizeof(v), true);
+		assert(!lo && !hi);
+		lo = 1;
+		bool keep = false;
+		struct _hv_send_packet_placeholder plch;
+		struct _hv_send_packet* f, **pp = &f;
+		uint32_t* pipeid;
+		size_t dwords = 0;
+		while(ring_iterator_next(&it, &v, sizeof(v), true)){
+			assert(v > 1);
+			struct _hv_send_packet* p = v&1 ? *(struct _hv_send_packet**)v : (struct _hv_send_packet*)v;
+			assert((uint32_t)lo == _hv_lseqof(p, bypass));
+			if(p->first){
+				if(keep){
+					_hv_add_to_send_pipe(state, pipeid, f, pp, dwords, &plch);
+					state->qd_bytes4 += dwords;
+					dwords = 0;
+				}
+				pipeid = p->payload4+_hv_first_header(p, bypass)-5;
+				keep = _hv_pipeid_in_range(pipeid, pipe0, pipe1);
+			}
+			if(keep){
+				if(v&1) _hv_unencrypt_packet(chacha_in, lo, hi, p);
+				if(first){
+					uint32_t pipe_last = _hv_find_pipe_last(state, pipeid, _hv_unsent_qos(&old_b, &old_pipes, pipeid), new_seq, &plch);
+					_hv_set_pipe_last(p, new_seq, pipe_last, bypass);
+					p->payload4[bypass ? 2 : 4] = new_seq;
+					p->payload4[0] = 0;
+					p->payload4[1] = 0;
+					if(!new_seq){
+						p = _hv_kexify(s, state, p, pipeid, bypass);
+						if(p->next){
+							*pp = p; pp = &p->next;
+							dwords += p->len4;
+							ring_buffer_push(&state->send_queue, &p, sizeof(struct _hv_send_packet*), true);
+							p = p->next;
+						}
+					}
+				}
+				*pp = p; pp = &p->next;
+				dwords += p->len4;
+				p->resent = 0; p->time_lo = 0;
+				ring_buffer_push(&state->send_queue, &p, sizeof(struct _hv_send_packet*), true);
+				new_seq++;
+			}else{
+				if(p->has_err_fb)
+					array_buffer_push(dropped, p->payload4 + p->len4, 20 + sizeof(uintptr_t));
+				array_buffer_push(&to_free, &p, sizeof(struct _hv_send_packet*));
+			}
+			if(!++lo) hi++;
+		}
+		if(keep){
+			_hv_add_to_send_pipe(state, pipeid, f, pp, dwords, &plch);
+		}
+	}else while(ring_iterator_next(&it, &v, sizeof(v), true)){
+		if(v < 2) continue;
+		struct _hv_send_packet* p = v&1 ? *(struct _hv_send_packet**)(v-1) : (struct _hv_send_packet*)v;
+		if(p->has_err_fb)
+			array_buffer_push(dropped, p->payload4 + p->len4, 20 + sizeof(uintptr_t));
+		array_buffer_push(&to_free, &p, sizeof(struct _hv_send_packet*));
+	}
+	ring_buffer_destroy(&old_send_queue);
+	array_buffer_destroy(&old_pipes);
+	hash_table_set_rank(&old_b, 0);
+
+	array_iterator_t it2 = array_buffer_iterator(&to_free, 0, SIZE_MAX);
+	struct _hv_send_packet* to_free_p;
+	while(array_iterator_next(&it2, &to_free_p, sizeof(struct _hv_send_packet*))) free(to_free_p);
+	array_buffer_destroy(&to_free);
+
+	state->send_seq_lo = new_seq; state->send_seq_hi = 0;
+	state->rtt_gate_hi = 0;
+	state->rtt_gate_lo = new_seq ? 8 : 0;
+
+	// If nothing was requeued, force a kEX next time
+	return !new_seq;
 }
 
 static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool bypass){
@@ -130,33 +361,36 @@ static uint64_t _hv_drain_writes(struct _hv_remote* state, uint64_t now, bool by
 	cutoff = (now - cutoff) << 21;
 	struct _hv_send_packet** replace = 0;
 	uint32_t base = _hv_send_base(state);
-	if(packet) for(;;){
-		if((int64_t)((packet->time_lo<<21) - cutoff) >= 0){
-			if(packet == packet0) packet0 = 0;
-			state->send_order_start = packet;
-			break;
+	if(packet){
+		if unlikely(packet->resent /* short-circuit */ && now - state->last_ack > state->server->message_timeout){
+			uint32_t pipe0[5] = {};
+			array_buffer_t dropped = {};
+			_hv_filter_send_queue(state->server, state, pipe0, pipe0, false, bypass, &dropped);
+			state->send_unlocked_ref++;
+			_hv_time_lock_rel(&state->send_last_used, 1);
+			_hv_fire_dropped(state->server, array_buffer_data(&dropped), array_buffer_size(&dropped), HIVEMIND_CLOSED_TIMEOUT);
+			array_buffer_destroy(&dropped);
+			uint64_t l = _hv_time_lock_acq(&state->send_last_used);
+			state->send_unlocked_ref--;
+			return l;
 		}
-		if(packet->resent++ == 15){
-			// 16 failed attempts, network partition? remote restarted? we don't know. Go into probe mode
-			// The packets we passed are still in send order, restore their slots
-			replace = &state->send_order_start;
-			for(struct _hv_send_packet* p = packet0; p != packet; p = p->next){
-				uintptr_t tagged = (uintptr_t)replace | 1;
-				ring_buffer_set(&state->send_queue, _hv_send_slot(state, p, bypass, base), &tagged, sizeof(tagged), true);
-				replace = &p->next;
+		for(;;){
+			if((int64_t)((packet->time_lo<<21) - cutoff) >= 0){
+				if(packet == packet0) packet0 = 0;
+				state->send_order_start = packet;
+				break;
 			}
-			state->rtt_gate_hi = 0; state->rtt_gate_lo = 4;
-			return now;
-		}
-		sent += (packet->len4<<2)+48;
-		// Not in send order while being resent, acks for it are ignored until it's relinked
-		uintptr_t tagged = (uintptr_t)replace | 1;
-		ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &tagged, sizeof(tagged), true);
-		packet = packet->next;
-		if(!packet || sent >= sendable_now){
-			if(!packet) state->send_order_end = &state->send_order_start;
-			state->send_order_start = packet;
-			break;
+			packet->resent = 1;
+			sent += (packet->len4<<2)+48;
+			// Not in send order while being resent, acks for it are ignored until it's relinked
+			uintptr_t tagged = (uintptr_t)replace | 1;
+			ring_buffer_set(&state->send_queue, _hv_send_slot(state, packet, bypass, base), &tagged, sizeof(tagged), true);
+			packet = packet->next;
+			if(!packet || sent >= sendable_now){
+				if(!packet) state->send_order_end = &state->send_order_start;
+				state->send_order_start = packet;
+				break;
+			}
 		}
 	}
 	if(packet){
@@ -348,6 +582,7 @@ static struct _hv_send_packet* _hv_send_slot_take(struct _hv_remote* state, size
 		uintptr_t acked_v = 1;
 		ring_buffer_set(&state->send_queue, i, &acked_v, sizeof(acked_v), true);
 	}
+	state->qd_bytes4 -= p->len4;
 	return p;
 }
 
@@ -504,236 +739,6 @@ static void _hv_queue_ack(struct _hv_remote* state, uint64_t lo, uint32_t hi, ui
 		state->ack_coal_i = 0;
 		if(!imm) goto add; // forced immediate send from overflow
 	}else _hv_link_unsent_ack(state);
-}
-
-// Undo the encryption of a sent (non bypass) packet with full sequence number [hi,lo], restoring the plaintext hivemind_send built. Mirrors the receiver in _hv_poll
-// Header words (tag/seq) are left as they are, the caller rewrites them
-static void _hv_unencrypt_packet(uint32_t chacha_in[16], uint64_t lo, uint32_t hi, struct _hv_send_packet* p){
-	chacha_in[13] = (uint32_t)lo; chacha_in[14] = (uint32_t)(lo>>32); chacha_in[15] = hi;
-	unsigned plen = p->len4, j = 5, tail = 0;
-	if(p->first){
-		uint32_t d[16]; memcpy(d, chacha_in, 64);
-		d[12] = 0xffffffff;
-		ChaCha20_block(d);
-		p->payload4[plen-1] ^= d[15];
-		if(p->kex){
-			p->payload4[plen-2] ^= d[14];
-			j = 9; tail = 2;
-		}else if(le32toh(p->payload4[plen-1])>>16 == 0xffff){
-			// Long encoding
-			p->payload4[plen-2] ^= d[14];
-			p->payload4[plen-3] ^= d[13];
-			tail = 3;
-		}else tail = 1;
-		for(unsigned i = 8; i < 13; i++, j++) p->payload4[j] ^= d[i];
-	}
-	unsigned blocks = plen > j+tail ? (plen-j-tail)>>4 : 0;
-	chacha_in[12] = 0;
-	if(blocks) ChaCha20_block_xor(chacha_in, (uint8_t*)(p->payload4+j), blocks);
-}
-
-// Header size (in dwords, including the pipe id) of a message's first packet
-#define _hv_first_header(p, bypass) ((p)->kex ? ((bypass) ? 9 : 14) : ((bypass) ? 8 : 10))
-
-// Message length and trailer size (in dwords) of a plaintext first packet, as encoded by hivemind_send
-static inline size_t _hv_first_len(struct _hv_send_packet* p, bool bypass, unsigned* tail){
-	const uint32_t* t = p->payload4 + p->len4;
-	if(p->kex){
-		*tail = 2;
-		return (size_t)le32toh(t[-2])<<16 | (le32toh(t[-1])&0xffff);
-	}
-	uint32_t x = le32toh(t[-1]);
-	if(x>>16 == 0xffff){
-		*tail = 3;
-		return (size_t)le32toh(t[-2])<<16 | (x&0xffff);
-	}
-	*tail = 1;
-	return bypass ? x&0xffff : x>>16;
-}
-
-// Rewrite the dependency of a (non kEX) first packet now sitting at sequence `self`
-static inline void _hv_set_pipe_last(struct _hv_send_packet* p, uint32_t self, uint32_t pipe_last, bool bypass){
-	uint32_t* t = p->payload4 + p->len4;
-	uint32_t x = le32toh(t[-1]);
-	if(x>>16 == 0xffff){
-		t[-3] = htole32(pipe_last);
-		return;
-	}
-	uint32_t diff = self - pipe_last;
-	// Doesn't fit the short encoding and we can't grow the packet, drop the dependency instead
-	if(diff > (bypass ? 0xfe : 0xffff)) diff = 0;
-	t[-1] = htole32(bypass ? (x&0xffff) | diff<<16 : (x&0xFFFF0000) | diff);
-}
-
-// QoS of a pipe in a (detached) pipes_with_unsent table, 0 if it isn't there
-static unsigned _hv_unsent_qos(const hash_table_t* b, array_buffer_t* pipes, const uint32_t id[5]){
-	char* data = array_buffer_data(pipes);
-	for(size_t pos = (size_t)hash_table_find(b, _hv_send_pipe_hash(id)); pos;){
-		struct _hv_send_pipe* ps = (struct _hv_send_pipe*)(data + pos) - 1;
-		if(!memcmp(ps->id, id, 20)) return (unsigned)(ps->queued >> (sizeof(size_t)*CHAR_BIT-2));
-		pos = (size_t)ps->next;
-	}
-	return 0;
-}
-
-// Turn the first message of the queue (chain starting at f, plaintext) into a kEX message, the same way hivemind_send starts a new connection
-// A non kEX first packet's data is moved into a new continuation packet so neither packet grows past the original's size (and therefore the MTU)
-static struct _hv_send_packet* _hv_kexify(hivemind_server_t* s, struct _hv_remote* state, struct _hv_send_packet* f, const uint32_t pipeid[5], bool bypass){
-	unsigned khdr = bypass ? 9 : 14;
-	unsigned hdr = _hv_first_header(f, bypass), chdr = bypass ? 3 : 5, tail;
-	size_t len = _hv_first_len(f, bypass, &tail);
-	unsigned data = f->len4 > hdr+tail ? f->len4-hdr-tail : 0;
-	size_t fb = f->has_err_fb ? 20+sizeof(uintptr_t) : 0;
-	struct _hv_send_packet* k = (struct _hv_send_packet*)_hv_alloc(sizeof(struct _hv_send_packet) + 4 * (khdr+2) + (data ? 0 : fb));
-	k->len4 = khdr+2; k->first = k->kex = 1; k->resent = 0; k->time_lo = 0;
-	k->has_err_fb = !data && f->has_err_fb;
-	memcpy(k->payload4+khdr-5, pipeid, 20);
-	k->payload4[khdr+1] = htole32(len&0xffff);
-	k->payload4[khdr] = htole32(len>>16);
-	struct _hv_send_packet* tail_p = k;
-	if(data){
-		struct _hv_send_packet* c = (struct _hv_send_packet*)_hv_alloc(sizeof(struct _hv_send_packet) + 4 * (chdr+data) + fb);
-		c->len4 = chdr+data; c->first = c->kex = 0; c->resent = 0; c->time_lo = 0;
-		c->has_err_fb = f->has_err_fb;
-		memcpy(c->payload4+chdr, f->payload4+hdr, data<<2);
-		k->next = c; tail_p = c;
-	}
-	// Error feedback lives after the last packet's payload
-	if(fb) memcpy(tail_p->payload4+tail_p->len4, f->payload4+f->len4, fb);
-	tail_p->next = 0;
-	_hv_free(f, _hv_packet_allocsz(f));
-	f = k;
-	// Fresh kEX, the old one is either rejected or too old
-	if(bypass){
-		uint64_t shash = _hv_mix64_addr(s->addr, le16toh(s->port_le)), dhash = _hv_mix64_addr(state->addr, state->port);
-		f->payload4[0] = htole32(shash); f->payload4[1] = htole32(shash>>32);
-		f->payload4[2] = htole32(dhash); f->payload4[3] = htole32(dhash>>32);
-		_hv_nalloc_id(s, state->send_key+3);
-		state->send_key[2] = 0;
-		state->send_crcinit = _hv_alloc_id_short(s);
-	}else _hv_ram_packed_kex(s, state, f->payload4+4);
-	return f;
-}
-
-struct _hv_dropped_packet{ struct _hv_send_packet* p; unsigned reason; };
-
-static inline void _hv_fire_dropped(hivemind_server_t* s, uint32_t* dropped, size_t count, unsigned reason){
-	while(count -= 20+sizeof(uintptr_t)){
-		struct _hv_tls_packet_detach d = {.packet_on_heap = SIZE_MAX};
-		uintptr_t udata = dropped[5];
-	#if UINTPTR_MAX > UINT32_MAX
-		udata |= (uintptr_t)dropped[6] << 32;
-	#endif
-		_hv_fire_pipe(s, dropped, (uint8_t*)udata, (SIZE_MAX-63) | reason, &d);
-		dropped += 6 + (UINTPTR_MAX > UINT32_MAX);
-	}
-}
-
-// ACK ERR: the remote has no state for us. Requeue (as unsent, renumbered from a new kEX) every complete message whose pipe is in [pipe0, pipe1]
-// Messages out of that range, or with any packet already acked, are dropped into `dropped`. The caller must pass it to _hv_fire_dropped once the send lock is released
-// Expects the send lock held exclusively (no unlocked refs). Returns true if nothing was requeued and the next hivemind_send should start a new kEX
-static bool _hv_filter_send_queue(hivemind_server_t* s, struct _hv_remote* state, uint32_t pipe0[5], uint32_t pipe1[5], bool first, bool bypass, array_buffer_t* dropped){
-	size_t rsz = ring_buffer_size(&state->send_queue) / sizeof(struct _hv_send_packet*);
-	uint64_t lo = state->send_seq_lo - rsz; uint32_t hi = state->send_seq_hi;
-	if(lo > state->send_seq_lo) hi--;
-	// An ack err for the kEX is only meaningful while the kEX is still at the front of the queue
-	if(first && (lo || hi)) return false;
-
-	uint32_t chacha_in[16] = CHACHA20_INIT;
-	if(!bypass) memcpy(chacha_in+4, state->send_key, 32);
-
-	// Pass 1: collect the packets of the messages to keep (plaintext, in order), drop everything else
-	array_buffer_t kept = {0};
-	size_t need = 0, mstart = 0;
-	// 0 while the message being walked is kept, otherwise why it's being dropped. Leading continuations belong to a message whose start was already acked
-	ring_iterator_t it = ring_buffer_iterator(&state->send_queue, 0, SIZE_MAX);
-	uintptr_t v;
-	ring_buffer_t old_send_queue = state->send_queue;
-	state->send_queue = (ring_buffer_t){};
-	state->send_order_start = 0;
-	state->send_order_end = &state->send_order_start;
-	array_buffer_t old_pipes = state->pipes_with_unsent;
-	hash_table_t old_b = state->pipes_with_unsent_b;
-	state->pipes_with_unsent = (array_buffer_t){};
-	state->pipes_with_unsent_b = (hash_table_t){};
-
-	array_buffer_t to_free = {};
-	uint32_t new_seq = 0;
-	if(first){
-		ring_iterator_skip(&it, sizeof(v), true);
-		assert(!lo && !hi);
-		lo = 1;
-		bool keep = false;
-		struct _hv_send_packet_placeholder plch;
-		struct _hv_send_packet* f, **pp = &f;
-		uint32_t* pipeid;
-		size_t dwords = 0;
-		while(ring_iterator_next(&it, &v, sizeof(v), true)){
-			assert(v > 1);
-			struct _hv_send_packet* p = v&1 ? *(struct _hv_send_packet**)v : (struct _hv_send_packet*)v;
-			assert((uint32_t)lo == _hv_lseqof(p, bypass));
-			if(p->first){
-				if(keep){
-					_hv_add_to_send_pipe(state, pipeid, f, pp, dwords, &plch);
-				}
-				pipeid = p->payload4+_hv_first_header(p, bypass)-5;
-				keep = _hv_pipeid_in_range(pipeid, pipe0, pipe1);
-			}
-			if(keep){
-				if(v&1) _hv_unencrypt_packet(chacha_in, lo, hi, p);
-				if(first){
-					uint32_t pipe_last = _hv_find_pipe_last(state, pipeid, _hv_unsent_qos(&old_b, &old_pipes, pipeid), new_seq, &plch);
-					_hv_set_pipe_last(p, new_seq, pipe_last, bypass);
-					p->payload4[bypass ? 2 : 4] = new_seq;
-					p->payload4[0] = 0;
-					p->payload4[1] = 0;
-					if(!new_seq){
-						p = _hv_kexify(s, state, p, pipeid, bypass);
-						if(p->next){
-							*pp = p; pp = &p->next;
-							dwords += p->len4;
-							ring_buffer_push(&state->send_queue, &p, sizeof(struct _hv_send_packet*), true);
-							p = p->next;
-						}
-					}
-				}
-				*pp = p; pp = &p->next;
-				dwords += p->len4;
-				p->resent = 0; p->time_lo = 0;
-				ring_buffer_push(&state->send_queue, &p, sizeof(struct _hv_send_packet*), true);
-				new_seq++;
-			}else{
-				if(p->has_err_fb)
-					array_buffer_push(dropped, p->payload4 + p->len4, 20 + sizeof(uintptr_t));
-				array_buffer_push(&to_free, &p, sizeof(struct _hv_send_packet*));
-			}
-			if(!++lo) hi++;
-		}
-		if(keep){
-			_hv_add_to_send_pipe(state, pipeid, f, pp, dwords, &plch);
-		}
-	}else while(ring_iterator_next(&it, &v, sizeof(v), true)){
-		if(v < 2) continue;
-		struct _hv_send_packet* p = v&1 ? *(struct _hv_send_packet**)(v-1) : (struct _hv_send_packet*)v;
-		if(p->has_err_fb)
-			array_buffer_push(dropped, p->payload4 + p->len4, 20 + sizeof(uintptr_t));
-		array_buffer_push(&to_free, &p, sizeof(struct _hv_send_packet*));
-	}
-	ring_buffer_destroy(&old_send_queue);
-	array_buffer_destroy(&old_pipes);
-	hash_table_set_rank(&old_b, 0);
-
-	array_iterator_t it2 = array_buffer_iterator(&to_free, 0, SIZE_MAX);
-	struct _hv_send_packet* to_free_p;
-	while(array_iterator_next(&it2, &to_free_p, sizeof(struct _hv_send_packet*))) free(to_free_p);
-	array_buffer_destroy(&to_free);
-
-	state->send_seq_lo = new_seq; state->send_seq_hi = 0;
-	state->rtt_gate_hi = 0;
-	state->rtt_gate_lo = new_seq ? 8 : 0;
-
-	// If nothing was requeued, force a kEX next time
-	return !new_seq;
 }
 
 static void _hv_send_probe_ack_err(hivemind_server_t* s, uint32_t opts, const remote_t* to){
@@ -901,6 +906,7 @@ static void _hv_ack_err_recvd(hivemind_server_t* s, struct _hv_remote* state, co
 		#if UINTPTR_MAX > UINT32_MAX
 			udata |= (uintptr_t)*(uint32_t*)(p->payload4+p->len4+6)<<32;
 		#endif
+			_hv_free(p, _hv_packet_allocsz(p));
 		}
 	}
 	reply: if(reply) _hv_send_ack_ext(state, lo, hi, true, bypass);
@@ -1586,18 +1592,19 @@ static void* _hv_listen(void* _){
 			uint64_t wake = GC_FREQ;
 			// early test
 			uint64_t tim = _hv_internal_clock();
-			if(atomic_load_explicit(&_hv_meta.unsent_ack, memory_order_relaxed) > (struct _hv_remote*)1){
-				struct _hv_remote* state = atomic_exchange_explicit(&_hv_meta.unsent_ack, 0, memory_order_acquire), *head = state, **prev = &head;
+			if((uintptr_t)atomic_load_explicit(&_hv_meta.unsent_ack, memory_order_relaxed) > 1){
+				struct _hv_remote* state = atomic_exchange_explicit(&_hv_meta.unsent_ack, 0, memory_order_acquire), *head = state;
+				atomic(struct _hv_remote*) *prev = (atomic(struct _hv_remote*)*)&head;
 				new_unsent_acks:
-				while(state > (struct _hv_remote*)1){
+				while((uintptr_t)state > 1){
 					uint64_t l = _hv_time_lock_acq(&state->recv_last_used);
-					struct _hv_remote* n = state->unsent_ack_next;
+					struct _hv_remote* n = atomic_load_explicit(&state->unsent_ack_next, memory_order_relaxed);
 					if(!state->ack_coal_i) goto rem;
 					if((((tim<<8) - (state->ack_coal_tim0<<8)) >> 8) >= _HV_SEND_TICK){
 						_hv_queue_ack(state, state->recv_seq_lo, state->recv_seq_hi, 0, true, state->bypass_type == 1);
 						rem:
-						*prev = n;
-						state->unsent_ack_next = 0;
+						atomic_store_explicit(prev, n, memory_order_relaxed);
+						atomic_store_explicit(&state->unsent_ack_next, 0, memory_order_relaxed);
 						if unlikely(!state->prevp){
 							uint64_t l = _hv_time_lock_try_acq(&state->send_last_used);
 							if(l){
@@ -1611,26 +1618,27 @@ static void* _hv_listen(void* _){
 				}
 				state = 0;
 				if(!atomic_compare_exchange_strong_explicit(&_hv_meta.unsent_ack, &state, head, memory_order_relaxed, memory_order_acquire)){
-					*prev = state;
+					atomic_store_explicit(prev, state, memory_order_relaxed);
 					goto new_unsent_acks;
 				}
-				if(head > (struct _hv_remote*)1) wake = _HV_SEND_TICK;
+				if((uintptr_t)head > 1) wake = _HV_SEND_TICK;
 			}
 			// early test
-			if(atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed) > (struct _hv_remote*)1){
-				struct _hv_remote* state = atomic_exchange_explicit(&_hv_meta.undrained, 0, memory_order_acquire), *head = state, **prev = &head;
+			if((uintptr_t)atomic_load_explicit(&_hv_meta.undrained, memory_order_relaxed) > 1){
+				struct _hv_remote* state = atomic_exchange_explicit(&_hv_meta.undrained, 0, memory_order_acquire), *head = state;
+				atomic(struct _hv_remote*) *prev = (atomic(struct _hv_remote*)*)&head;
 				new_undraineds:
-				while(state > (struct _hv_remote*)1){
+				while((uintptr_t)state > 1){
 					uint64_t l = _hv_time_lock_acq(&state->send_last_used);
 					uint64_t tim = _hv_internal_clock();
-					struct _hv_remote* n = state->undrained_next;
+					struct _hv_remote* n = atomic_load_explicit(&state->undrained_next, memory_order_relaxed);
 					if(!ring_buffer_size(&state->send_queue)){
-						*prev = n;
-						state->undrained_next = 0;
+						atomic_store_explicit(prev, n, memory_order_relaxed);
+						atomic_store_explicit(&state->undrained_next, 0, memory_order_relaxed);
 						if unlikely(!state->prevp){
 							uint64_t l = _hv_time_lock_try_acq(&state->recv_last_used);
 							if(l){
-								if(!state->unsent_ack_next){ free(state); goto next_u; }
+								if(!atomic_load_explicit(&state->unsent_ack_next, memory_order_relaxed)){ free(state); goto next_u; }
 								else _hv_time_lock_rel(&state->recv_last_used, l);
 							}
 						}
@@ -1643,10 +1651,10 @@ static void* _hv_listen(void* _){
 				}
 				state = 0;
 				if(!atomic_compare_exchange_strong_explicit(&_hv_meta.undrained, &state, head, memory_order_relaxed, memory_order_acquire)){
-					*prev = state;
+					atomic_store_explicit(prev, state, memory_order_relaxed);
 					goto new_undraineds;
 				}
-				if(head > (struct _hv_remote*)1) wake = _HV_SEND_TICK;
+				if((uintptr_t)head > 1) wake = _HV_SEND_TICK;
 			}
 			uint64_t last_gc = atomic_load_explicit(&_hv_meta.last_gc, memory_order_relaxed);
 			if unlikely(s_s && last_gc != -1ull && tim - last_gc > GC_FREQ && atomic_compare_exchange_strong_explicit(&_hv_meta.last_gc, &last_gc, -1ull, memory_order_acquire, memory_order_relaxed)){

@@ -45,10 +45,16 @@ struct hivemind_server{ union{
 		uint8_t network_bypass_prefix_v6, network_bypass_prefix_v4;
 		// User data passed to `on_msg` / `on_close` callbacks as the first argument. Default is a pointer to the hivemind server. This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
 		void* udata;
-		// How long a connection is "remembered" for, in microseconds. Key exchanges are relatively cheap so this affects memory usage more than performance
-		// This value dictates the longest that a network partition can last before delivery guarantees become invalid.
+		// How long a connection can go without any ACKs before it is presumed dead, in microseconds.
+		// This value dictates the longest that a network partition can last before delivery guarantees become invalid and an error is produced
+		// Default: 15min (900'000'000)
 		// This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
 		uint64_t message_timeout;
+		// How many bytes a connection can have queued before we consider it too slow and reject new messages as a failsafe against OOM.
+		// Note that this tracks network bytes as an approximation of memory usage, rather than an exact number of application bytes.
+		// Default: 2GB
+		// This value can be written after `hivemind_init()` but before `hivemind_start()`, see the note on `hivemind_init()`.
+		size_t backpressure_limit;
 	};
 	// Combined IP address, port and MTU used when constructing pipes. This is a view over the exact same memory as the `addr`, `port_le` and `mtu_le` fields. The same write restrictions apply.
 	uint32_t dwords[5];
