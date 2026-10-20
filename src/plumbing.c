@@ -560,6 +560,12 @@ struct{
 	atomic(uint64_t) last_gc;
 	atomic(hivemind_server_t*) servers;
 	atomic(struct _hv_thread*) threads;
+	// Thread autoscaling. busy_us: CPU time flushed by listener threads since the last evaluation
+	// scale_at: time of the last evaluation, -1 while one is in progress (acts as a lock for `load` and `scale_changed`)
+	// load: moving average of per-thread utilization. scale_changed: time of the last spawn/retire
+	atomic(uint64_t) busy_us, scale_at;
+	float load;
+	uint64_t scale_changed;
 } _hv_meta = {
 	.threads_lock = 1,
 	.undrained = (struct _hv_remote*)1,

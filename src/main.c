@@ -62,6 +62,8 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 			goto err3;
 		}
 		_hv_meta.threads_cur = 1; _hv_meta.threads_max = (uint32_t)available_concurrency();
+		_hv_meta.scale_changed = _hv_internal_clock();
+		atomic_store_explicit(&_hv_meta.scale_at, _hv_meta.scale_changed, memory_order_release);
 		thread_detach(thread_create(_hv_listen, 0, 0));
 	}else if(!x_event_queue_add(&_hv_meta.queue, sock, (union x_userdata_t){.ptr = s})) goto err2;
 	hivemind_server_t* prev = atomic_load_explicit(&_hv_meta.servers, memory_order_relaxed);

@@ -21,6 +21,14 @@ static inline void _hv_hazard_wait(void* target){
 
 #define GC_FREQ (3600*SECOND_US)
 
+// Listener thread autoscaling
+#define _HV_SCALE_SAMPLE (250*MILLISECOND_US) // How often each thread flushes its CPU time
+#define _HV_SCALE_PERIOD SECOND_US // How often the load is evaluated
+#define _HV_SCALE_WINDOW (30*SECOND_US) // Time constant of the load moving average
+#define _HV_SCALE_COOLDOWN (5*SECOND_US) // Minimum time between spawning/retiring threads
+#define _HV_SCALE_HIGH .75f // Spawn a thread above this per-thread load
+#define _HV_SCALE_LOW .40f // Retire a thread if the load would stay below this without it
+
 static void _hv_remove_unused(hivemind_server_t* s, uint64_t t){
 	array_buffer_t candidates = {0};
 	uint64_t c = s->message_timeout;
@@ -97,7 +105,7 @@ static void _hv_send_packet(struct _hv_remote* state, struct _hv_send_packet* pa
 	packet->time_lo = now;
 }
 
-// Undo the encryption of a sent (non bypass) packet with full sequence number [hi,lo], restoring the plaintext hivemind_send built. Mirrors the receiver in _hv_poll
+// Undo the encryption of a sent (non bypass) packet with full sequence number [hi,lo], restoring the plaintext hivemind_send built.
 // Header words (tag/seq) are left as they are, the caller rewrites them
 static void _hv_unencrypt_packet(uint32_t chacha_in[16], uint64_t lo, uint32_t hi, struct _hv_send_packet* p){
 	chacha_in[13] = (uint32_t)lo; chacha_in[14] = (uint32_t)(lo>>32); chacha_in[15] = hi;
@@ -853,11 +861,6 @@ static bool _hv_ack_ext_valid(struct _hv_remote* state, const uint8_t* packet, b
 	return bypass ? expect[0] == ptag[0] && expect[1] == ptag[1] : !memcmp16(expect, ptag);
 }
 
-// The message whose last packet is in slot idx (full sequence number [hi,lo]) couldn't be delivered to pipe `id`. Reply with an ack_err instead of an ack
-static void _hv_recv_slot_err(hivemind_server_t* s, struct _hv_remote* state, size_t idx, uint64_t lo, uint32_t hi, const uint32_t id[5], bool bypass){
-	
-}
-
 static void _hv_ack_err_ack_recvd(hivemind_server_t* s, struct _hv_remote* state, const uint8_t* packet, uint32_t seq, bool bypass){
 	uint64_t l = _hv_time_lock_acq(&state->recv_last_used);
 	shared_lock_release(&s->state_lock);
@@ -1550,6 +1553,48 @@ static uint8_t* _hv_drain_reads(hivemind_server_t* s, uint8_t* packet, unsigned 
 	return packet;
 }
 
+static void* _hv_listen(void* _);
+
+// Update the load average and spawn/retire a listener thread if needed. Expects the scale_at lock held
+// Returns -1 if the calling thread should retire, otherwise 0
+static int _hv_autoscale(uint64_t now, uint64_t dt){
+	lock_acquire(&_hv_meta.threads_lock, 1);
+	uint32_t n = _hv_meta.threads_cur, max = _hv_meta.threads_max;
+	lock_release(&_hv_meta.threads_lock, 1);
+	if(!n) return 0;
+	float u = (float)atomic_exchange_explicit(&_hv_meta.busy_us, 0, memory_order_relaxed) / ((float)dt * n);
+	if(u > 1.f) u = 1.f;
+	float load = _hv_meta.load;
+	load += (u - load) * ((float)dt / (float)(dt + _HV_SCALE_WINDOW));
+	_hv_meta.load = load;
+	if(now - _hv_meta.scale_changed < _HV_SCALE_COOLDOWN) return 0;
+	uint32_t cap = max > 1 ? max-1 : 1;
+	if(load > _HV_SCALE_HIGH && n < cap){
+		lock_acquire(&_hv_meta.threads_lock, 1);
+		_hv_meta.threads_cur++;
+		lock_release(&_hv_meta.threads_lock, 1);
+		thread_t t = thread_create(_hv_listen, 0, 0);
+		if(!t){
+			lock_acquire(&_hv_meta.threads_lock, 1);
+			_hv_meta.threads_cur--;
+			lock_release(&_hv_meta.threads_lock, 1);
+			return 0;
+		}
+		thread_detach(t);
+		// Same total work, spread over one more thread
+		_hv_meta.load = load * n / (n+1);
+		_hv_meta.scale_changed = now;
+	}else if(n > 1 && load * n / (n-1) < _HV_SCALE_LOW){
+		lock_acquire(&_hv_meta.threads_lock, 1);
+		_hv_meta.threads_cur--;
+		lock_release(&_hv_meta.threads_lock, 1);
+		_hv_meta.load = load * n / (n-1);
+		_hv_meta.scale_changed = now;
+		return -1;
+	}
+	return 0;
+}
+
 static void* _hv_listen(void* _){
 #ifdef _POSIX_THREADS
 	sigset_t set; sigfillset(&set);
@@ -1566,7 +1611,21 @@ static void* _hv_listen(void* _){
 	lock_release(&_hv_meta.threads_lock, 1);
 
 	uint8_t* packet = 0; unsigned packetsz = 0;
+	uint64_t cpu0 = thread_now(), flush_at = _hv_internal_clock();
 	for(;;){
+		// Nothing is held here, so this is where we measure our CPU usage and may retire
+		uint64_t now = _hv_internal_clock();
+		if unlikely(now - flush_at >= _HV_SCALE_SAMPLE){
+			uint64_t cpu = thread_now();
+			atomic_fetch_add_explicit(&_hv_meta.busy_us, cpu - cpu0, memory_order_relaxed);
+			cpu0 = cpu; flush_at = now;
+			uint64_t scale_at = atomic_load_explicit(&_hv_meta.scale_at, memory_order_relaxed);
+			if(scale_at != -1ull && now - scale_at >= _HV_SCALE_PERIOD && atomic_compare_exchange_strong_explicit(&_hv_meta.scale_at, &scale_at, -1ull, memory_order_acquire, memory_order_relaxed)){
+				int r = _hv_autoscale(now, now - scale_at);
+				atomic_store_explicit(&_hv_meta.scale_at, now, memory_order_release);
+				if(r < 0) break;
+			}
+		}
 		x_event_t ev = x_event_queue_wait(&_hv_meta.queue, -1ull);
 		tsan_fence(memory_order_acquire);
 		if(ev.type & (X_EVENT_READABLE/*|X_EVENT_WRITABLE*/))
@@ -1576,6 +1635,9 @@ static void* _hv_listen(void* _){
 			hivemind_server_t* s_s = atomic_load_explicit(&_hv_meta.servers, memory_order_relaxed);
 			if unlikely(!s_s){
 				x_event_queue_wake(&_hv_meta.queue, 0);
+				lock_acquire(&_hv_meta.threads_lock, 1);
+				_hv_meta.threads_cur--;
+				lock_release(&_hv_meta.threads_lock, 1);
 				break;
 			}
 			hivemind_server_t* help = atomic_load_explicit(&_hv_meta.read_help_requested, memory_order_relaxed);

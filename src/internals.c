@@ -37,7 +37,7 @@ static inline void* _hv_alloc_a(size_t bytes, size_t to){
 	return addr;
 }
 #define _HV_ALLOCATOR_SIZED 0
-static inline void _hv_free(void* addr, size_t bytes){ free(addr); }
+static inline void _hv_free(void* addr, size_t bytes){ free(addr); (void)bytes; }
 
 // Used by hashmaps
 static inline uint64_t _hv_mix64(uint64_t x){
