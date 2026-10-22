@@ -24,7 +24,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 	s->handle = sock;
 	bool has_addr = s->addr.dwords[0] || s->addr.dwords[1] || s->addr.dwords[2] || s->addr.dwords[3];
 	if(!has_addr || !s->port_le || !s->mtu_le){
-		if(!x_udp_reflect(sock, reflect_test, &where)) err: {
+		if(!x_udp_reflect(sock, reflect_test, &where, true)) err: {
 			x_socket_free(sock);
 			return false;
 		}
@@ -61,7 +61,7 @@ bool hivemind_start(hivemind_server_t* s, remote_t where, ip_addr_t reflect_test
 			x_event_queue_destroy(&_hv_meta.queue);
 			goto err3;
 		}
-		_hv_meta.threads_cur = 1; _hv_meta.threads_max = (uint32_t)available_concurrency();
+		_hv_meta.threads_cur = 1; _hv_meta.threads_max = (uint32_t)available_concurrency()-1;
 		_hv_meta.scale_changed = _hv_internal_clock();
 		atomic_store_explicit(&_hv_meta.scale_at, _hv_meta.scale_changed, memory_order_release);
 		thread_detach(thread_create(_hv_listen, 0, 0));

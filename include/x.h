@@ -1,14 +1,14 @@
 #pragma once
 
 #ifdef __cplusplus
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4838 2397)
-#else
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wc++11-narrowing"
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#endif
+	#ifdef _MSC_VER
+		#pragma warning(push)
+		#pragma warning(disable : 4838 2397)
+	#else
+		#pragma GCC diagnostic push
+		#pragma GCC diagnostic ignored "-Wc++11-narrowing"
+		#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+	#endif
 #endif
 
 #include <limits.h>
@@ -36,7 +36,7 @@ typedef HANDLE x_file_t;
 typedef struct{
 	HANDLE hFind;
 	_WIN32_FIND_DATAA a;
-} *x_folder_list_t;
+}* x_folder_list_t;
 typedef SOCKET x_socket_t;
 static const x_file_t X_FILE_INVALID = (x_file_t) INVALID_HANDLE_VALUE;
 static const x_socket_t X_SOCKET_INVALID = (x_socket_t) INVALID_SOCKET;
@@ -62,16 +62,16 @@ typedef int x_socket_t;
 static const x_socket_t X_SOCKET_INVALID = (x_socket_t) -1;
 #endif
 
-union x_userdata_t{
+typedef union x_userdata{
 	void* ptr;
 	x_socket_t socket;
 	uint32_t u32;
 	uintptr_t uptr;
-};
+} x_userdata_t;
 
-typedef struct{
+typedef struct x_event{
 	uint32_t type;
-	union x_userdata_t data;
+	x_userdata_t data;
 } x_event_t;
 
 #define _X_INLINE_EVENT_BUFFER 20
@@ -79,14 +79,14 @@ typedef struct{
 
 #include <sys/epoll.h>
 
-typedef struct{
+typedef struct x_event_queue{
 	int _fd, _tfd;
 	_Atomic uint64_t _min_wake;
 	_Atomic uint32_t _bits;
 	struct epoll_event _ev[_X_INLINE_EVENT_BUFFER];
 } x_event_queue_t;
 #else
-typedef struct{
+typedef struct x_event_queue{
 	int _fd; _Atomic uint32_t _bits;
 	_Atomic uint64_t _min_wake;
 	struct{ uint32_t typ, udata[sizeof(uintptr_t)>>2]; } _ev[_X_INLINE_EVENT_BUFFER];
@@ -97,7 +97,7 @@ static const uint64_t X_FILE_NOT_FOUND = 0, X_FILE_UNKNOWN = 0,
 	X_FILE_TYPE_FILE = 1,
 	X_FILE_TYPE_FOLDER = 2,
 	X_FILE_TYPE_SPECIAL = 3;
-typedef struct{
+typedef struct x_stat{
 	uint64_t type:4;
 	uint64_t modified:60;
 	uint64_t size;
@@ -105,19 +105,19 @@ typedef struct{
 
 static const uint32_t X_EVENT_SIGNAL = 256, X_EVENT_TIMEOUT = 512, X_EVENT_WAKE = 1024, X_EVENT_EOF = 8192, X_EVENT_CLOSE = 16, X_EVENT_READABLE = 1, X_EVENT_WRITABLE = 4, X_EVENT_ERROR = 8;
 
-typedef union{
+typedef struct ip_addr{ union{
 	struct{ uint8_t bytes[16]; };
 	struct{ uint16_t words[8]; };
 	struct{ uint32_t dwords[4]; };
-} ip_addr_t;
+}; } ip_addr_t;
 
-typedef struct{
+typedef struct remote{
 	ip_addr_t addr;
 	uint16_t port, mtu;
 	uint32_t interface;
 } remote_t;
 
-static const int IP_STR_MAX_LEN = 40; //, INTERFACE_STR_MAX_LEN = 16;
+static const size_t IP_STR_MAX_LEN = 40, INTERFACE_STR_MAX_LEN;
 
 // Create a directory
 static bool x_mkdir(const char* name);
@@ -190,7 +190,8 @@ static const size_t X_PAGE_SIZE = 65536;
 static ip_addr_t ip_from_string(const char* str);
 
 enum ip_kind{
-	IP_KIND_V4 = 0, IP_KIND_V6 = 1
+	IP_KIND_INVALID = 0,
+	IP_KIND_V4 = 4, IP_KIND_V6 = 6,
 };
 // Stringify an ip_addr_t into a human-readable string, such as "1.2.3.4" or "2001:db8:1001:2002:db8::1234"
 static enum ip_kind ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
@@ -198,11 +199,18 @@ static enum ip_kind ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
 // Find the index of a network interface from its name, such as "eth0" or "en0". Returns 0 if the interface was not found (0 is never a valid interface index).
 static uint32_t interface_from_str(const char* interface_name);
 
+// Get the name of a network interface from its index, such as "eth0" or "en0". Fills `out` with an empty string the interface was invalid (e.g 0 is never a valid interface index).
+static void interface_to_str(uint32_t i, char out[INTERFACE_STR_MAX_LEN]);
+
+// Find an interface's raw MTU (which will not subtract IP/TCP/UDP/... header sizes)
+static size_t interface_mtu(uint32_t i);
+
 // Create a new UDP socket which will automatically select a port/address/interface as needed, ideal for clients
 static x_socket_t x_udp_auto(void);
 
-// Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the MTU for that path. The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
-static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from);
+// Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the interface and its MTU for that path (if extinfo is true). The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
+// This function is only guaranteed to succeed once per socket
+static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from, bool extinfo);
 
 // Set socket options for a UDP socket, specifically the send and receive buffer sizes. Note that these sizes are not guaranteed to be set to exactly what you specify, the operating system may silently round them up or down, and there may be hard limits on how large they can be.
 static bool x_udp_opts(x_socket_t s, size_t send_buf, size_t recv_buf);
@@ -227,7 +235,7 @@ static void x_socket_free(x_socket_t sock);
 static bool x_event_queue_init(x_event_queue_t* out);
 
 // Add a socket to an event queue, which will emit X_EVENT_READABLE/X_EVENT_WRITABLE/X_EVENT_CLOSED events when the socket becomes readable/writable/closed respectively
-static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, union x_userdata_t data);
+static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, x_userdata_t data);
 
 // Wait for the next event, or up until `timeout` microseconds (in which case an X_EVENT_TIMEOUT event is returned), or a process signal is received (in which case an X_EVENT_SIGNAL event is returned). Waiting on the same event queue from multiple threads is well-defined: exactly one of the waiting threads will receive any given event. Which thread receives it is not defined, it may be different even for the same socket, and may not be evenly distributed. A `timeout` of -1 means to wait indefinitely until an event occurs.
 static x_event_t x_event_queue_wait(x_event_queue_t* queue, uint64_t timeout);
@@ -251,6 +259,12 @@ static void x_zerobytes(void* data, size_t len);
 #ifdef _WIN32
 #include <malloc.h>
 #include <libloaderapi.h>
+#include <winsock2.h>
+#include <ws2ipdef.h>
+#include <iphlpapi.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "iphlpapi.lib")
+#endif
 #define alloca _alloca
 
 static const unsigned X_FILE_READONLY = 1;
@@ -484,11 +498,13 @@ static uint64_t x_getsize(x_file_t fd){
 }
 
 static size_t x_read(x_file_t fd, void* buf, uint64_t start, size_t count){
-	return (size_t)pread(fd, buf, count, (off_t)start);
+	size_t r = pread(fd, buf, count, (off_t)start);
+	return r == SIZE_MAX ? 0 : r;
 }
 
 static size_t x_write(x_file_t fd, const void* buf, uint64_t start, size_t count){
-	return (size_t)pwrite(fd, buf, count, (off_t)start);
+	size_t r = pwrite(fd, buf, count, (off_t)start);
+	return r == SIZE_MAX ? 0 : r;
 }
 
 static bool x_setsize(x_file_t fd, uint64_t sz){
@@ -548,7 +564,7 @@ static bool x_mkdir(const char* name){
 }
 
 static bool x_remove(const char* name){
-	return unlink(name) == 0 || (errno != EPERM && rmdir(name) == 0);
+	return unlink(name) == 0 || (errno != EACCES && rmdir(name) == 0);
 }
 
 static x_folder_list_t x_dir_open(const char* name){ return opendir(name); }
@@ -566,14 +582,17 @@ static bool x_move(const char* old_name, const char* new_name){
 static ip_addr_t ip_from_string(const char* str){
 	ip_addr_t a = {.words={0}};
 	if(inet_pton(AF_INET6, str, &a) != 1){
-		if(inet_pton(AF_INET, str, &a.dwords[3]) == 1) a.words[5] = a.dwords[3] ? 0xffff : 0;
+		if(inet_pton(AF_INET, str, &a.dwords[3]) == 1) a.words[5] = 0xffff;
 	}
 	return a;
 }
 
 static enum ip_kind ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]){
 	bool ipv6 = addr.dwords[0] | addr.dwords[1] | addr.words[4] | (uint16_t)~addr.words[5];
-	inet_ntop(ipv6 ? AF_INET6 : AF_INET, ipv6 ? (void*)&addr : (void*)&addr.dwords[3], out, IP_STR_MAX_LEN);
+	if(!inet_ntop(ipv6 ? AF_INET6 : AF_INET, ipv6 ? (void*)&addr : (void*)&addr.dwords[3], out, IP_STR_MAX_LEN)){
+		out[0] = '\0';
+		return IP_KIND_INVALID;
+	}
 	return ipv6 ? IP_KIND_V6 : IP_KIND_V4;
 }
 
@@ -593,8 +612,23 @@ static x_socket_t x_udp_auto(void){
 	}
 	return fd;
 }
+
+static const size_t INTERFACE_STR_MAX_LEN = IFNAMSIZ;
 static uint32_t interface_from_str(const char* i){ return if_nametoindex(i); }
-//static bool interface_to_str(uint32_t i, char o[INTERFACE_STR_MAX_LEN]){ return if_indextoname(i, o)==o; }
+static void interface_to_str(uint32_t i, char out[INTERFACE_STR_MAX_LEN]){ if(!if_indextoname(i, out)) out[0] = '\0'; }
+
+static size_t interface_mtu(uint32_t i){
+	if(!i) return 0;
+	struct ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
+	if_indextoname(i, ifr.ifr_name);
+	int s = socket(AF_INET6, SOCK_DGRAM, 0);
+	if(s < 0) return 0;
+	if(ioctl(s, SIOCGIFMTU, &ifr)) ifr.ifr_mtu = 0;
+	close(s);
+	return (size_t)ifr.ifr_mtu;
+}
+
 static x_socket_t x_udp_bound(remote_t from){
 	struct sockaddr_in6 addr;
 	addr.sin6_family = AF_INET6;
@@ -617,73 +651,71 @@ static x_socket_t x_udp_bound(remote_t from){
 	return fd;
 }
 
-static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from){
+static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from, bool extinfo){
 	struct sockaddr_in6 addr = {.sin6_family = AF_INET6};
 	addr.sin6_port = 0x1111;
 	*(ip_addr_t*)&addr.sin6_addr = to;
 	socklen_t addrlen = sizeof(addr);
 	if(connect(s, (struct sockaddr*) &addr, addrlen)) return false;
 	int r = getsockname(s, (struct sockaddr*)&addr, &addrlen);
-	struct sockaddr_in unspec = {0};
-	unspec.sin_family = AF_UNSPEC;
-	(void) connect(s, (struct sockaddr*)&unspec, sizeof(unspec));
+	struct sockaddr_in6 unspec = {.sin6_family = AF_UNSPEC};
+	(void)connect(s, (struct sockaddr*)&unspec, sizeof(unspec));
 	if(r) return false;
-	if(from){
-		if(addr.sin6_family == AF_INET6){
-			from->addr = *(ip_addr_t*)&addr.sin6_addr;
-			from->port = ntohs(addr.sin6_port);
-		}else{
-			struct sockaddr_in* addr4 = (struct sockaddr_in*)&addr;
-			from->addr.dwords[0] = from->addr.dwords[1] = 0;
-			from->addr.words[4] = 0; from->addr.words[5] = 0xffff;
-			from->addr.dwords[3] = addr4->sin_addr.s_addr;
-			from->port = ntohs(addr.sin6_port);
-		}
+	if(addr.sin6_family == AF_INET6){
+		from->addr = *(ip_addr_t*)&addr.sin6_addr;
+		from->port = ntohs(addr.sin6_port);
+	}else{
+		struct sockaddr_in* addr4 = (struct sockaddr_in*)&addr;
+		from->addr.dwords[0] = from->addr.dwords[1] = 0;
+		from->addr.words[4] = 0; from->addr.words[5] = 0xffff;
+		from->addr.dwords[3] = addr4->sin_addr.s_addr;
+		from->port = ntohs(addr.sin6_port);
 	}
 	uint32_t* d = from->addr.dwords;
 	int o = 48;
-#if 0 // MTU discovery is for sockets that have already been used
-	socklen_t four = 4; int mtu2;
-	if(getsockopt(s, IPPROTO_IP, IPV6_MTU, &mtu2, &four)) return false;
-	if(!d[0] && !d[1] && d[2] == ntohl(0x0000FFFF)) o = 28;
-	from->mtu = mtu2-o;
-#else
-	struct ifreq ifr;
-	memset(&ifr, 0, sizeof(ifr));
-	if(addr.sin6_family == AF_INET6 && addr.sin6_scope_id){
-		if(!if_indextoname(addr.sin6_scope_id, ifr.ifr_name)) return false;
-	}else{
-		struct ifaddrs *ifap;
-		if(getifaddrs(&ifap)) return false;
-		if(!from->addr.dwords[0] && !from->addr.dwords[1] && from->addr.dwords[2] == ntohl(0x0000FFFF)){
-			// ipv4
-			//o = 28;
-			for(struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next){
-				struct sockaddr_in* addr = (struct sockaddr_in*) ifa->ifa_addr;
-				if(!addr || addr->sin_family != AF_INET) continue;
-				uint32_t mask = ((struct sockaddr_in*) ifa->ifa_netmask)->sin_addr.s_addr;
-				if((d[3] & mask) != (addr->sin_addr.s_addr & mask)) continue;
-				strncpy(ifr.ifr_name, ifa->ifa_name, IF_NAMESIZE);
-				break;
-			}
+	if(extinfo){
+		struct ifreq ifr;
+		memset(&ifr, 0, sizeof(ifr));
+		if(addr.sin6_family == AF_INET6 && addr.sin6_scope_id){
+			if(!if_indextoname(addr.sin6_scope_id, ifr.ifr_name)) return false;
+			from->interface = addr.sin6_scope_id;
 		}else{
-			// ipv6
-			for(struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next){
-				struct sockaddr_in6* addr = (struct sockaddr_in6*) ifa->ifa_addr;
-				if(!addr || addr->sin6_family != AF_INET6) continue;
-				uint32_t* addrw = (uint32_t*)&addr->sin6_addr;
-				uint32_t* mask = (uint32_t*)&((struct sockaddr_in6*) ifa->ifa_netmask)->sin6_addr;
-				if(((d[0] & mask[0]) ^ (addrw[0] & mask[0])) | ((d[1] & mask[1]) ^ (addrw[1] & mask[1])) | ((d[2] & mask[2]) ^ (addrw[2] & mask[2])) | ((d[3] & mask[3]) ^ (addrw[3] & mask[3]))) continue;
-				strncpy(ifr.ifr_name, ifa->ifa_name, IF_NAMESIZE);
-				break;
+			struct ifaddrs *ifap;
+			if(getifaddrs(&ifap)) return false;
+			if(!from->addr.dwords[0] && !from->addr.dwords[1] && from->addr.dwords[2] == ntohl(0x0000FFFF)){
+				// ipv4
+				//o = 28;
+				for(struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next){
+					struct sockaddr_in* addr = (struct sockaddr_in*) ifa->ifa_addr;
+					if(!addr || addr->sin_family != AF_INET) continue;
+					uint32_t mask = ((struct sockaddr_in*) ifa->ifa_netmask)->sin_addr.s_addr;
+					if((d[3] & mask) != (addr->sin_addr.s_addr & mask)) continue;
+					from->interface = if_nametoindex(ifa->ifa_name);
+					strncpy(ifr.ifr_name, ifa->ifa_name, IF_NAMESIZE);
+					break;
+				}
+			}else{
+				// ipv6
+				for(struct ifaddrs *ifa = ifap; ifa; ifa = ifa->ifa_next){
+					struct sockaddr_in6* addr = (struct sockaddr_in6*) ifa->ifa_addr;
+					if(!addr || addr->sin6_family != AF_INET6) continue;
+					uint32_t* addrw = (uint32_t*)&addr->sin6_addr;
+					uint32_t* mask = (uint32_t*)&((struct sockaddr_in6*) ifa->ifa_netmask)->sin6_addr;
+					if(((d[0] & mask[0]) ^ (addrw[0] & mask[0])) | ((d[1] & mask[1]) ^ (addrw[1] & mask[1])) | ((d[2] & mask[2]) ^ (addrw[2] & mask[2])) | ((d[3] & mask[3]) ^ (addrw[3] & mask[3]))) continue;
+					from->interface = if_nametoindex(ifa->ifa_name);
+					strncpy(ifr.ifr_name, ifa->ifa_name, IF_NAMESIZE);
+					break;
+				}
 			}
+			freeifaddrs(ifap);
+			if(!ifr.ifr_name[0]) return false;
 		}
-		freeifaddrs(ifap);
-		if(!ifr.ifr_name[0]) return false;
+		if(ioctl(s, SIOCGIFMTU, &ifr)) return false;
+		from->mtu = (uint16_t)(ifr.ifr_mtu - o);
+	}else{
+		from->mtu = 0;
+		from->interface = 0;
 	}
-	if(ioctl(s, SIOCGIFMTU, &ifr)) return false;
-	from->mtu = (uint16_t)(ifr.ifr_mtu - o);
-#endif
 	return true;
 }
 
@@ -731,16 +763,16 @@ static int x_udp_next_read(x_socket_t sock, remote_t* from, void* msg, size_t ma
 }
 static void x_udp_close(x_socket_t sock){
 	struct sockaddr_in6 addr = {.sin6_family = AF_INET6, .sin6_port = 0x1111};
-	*(ip_addr_t*)&addr.sin6_addr = (ip_addr_t){.words={0,0,0,0,0,0xffff,0,0}};
-	// Retarded POSIX standard doesn't let us shutdown() a non-connected UDP socket
-	// We make the socket "invalid" by connecting to ::ffff:0.0.0.0 which disables all "real" reads.
+	*(ip_addr_t*)&addr.sin6_addr = (ip_addr_t){};
+	// POSIX standard doesn't let us shutdown() a non-connected UDP socket
+	// We make the socket "invalid" by connecting to :: which disables all "real" reads.
 	// On Linux, we also call shutdown(SHUT_RDWR) after connect() so that epoll emits EPOLLHUP
 	// (which equals X_EVENT_CLOSE), making event detection reliable without relying on
 	// the writable-byte-count that kqueue provides but epoll does not.
 #if !defined(__linux__)
 	int one = 1; setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &one, sizeof(one));
 #endif
-	(void) connect(sock, (struct sockaddr*) &addr, sizeof(addr));
+	(void)connect(sock, (struct sockaddr*) &addr, sizeof(addr));
 #if defined(__linux__)
 	shutdown(sock, SHUT_RDWR);
 #endif
@@ -776,7 +808,7 @@ static bool x_event_queue_init(x_event_queue_t* out){
 	return true;
 }
 _Static_assert(sizeof(struct epoll_event) <= sizeof(x_event_t), "");
-static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, union x_userdata_t data){
+static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, x_userdata_t data){
 	struct epoll_event ev = {.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLPRI | EPOLLET, .data = {.ptr = data.ptr}};
 	return !epoll_ctl(queue->_fd, EPOLL_CTL_ADD, sock, &ev) ||
 		(errno == EEXIST && !epoll_ctl(queue->_fd, EPOLL_CTL_MOD, sock, &ev));
@@ -901,7 +933,7 @@ static bool x_event_queue_init(x_event_queue_t* out){
 	return true;
 }
 
-static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, union x_userdata_t data){
+static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, x_userdata_t data){
 	struct kevent ev[2] = {
 		{ .ident = (uintptr_t)sock, .filter = EVFILT_READ, .flags = EV_ADD | EV_CLEAR, .fflags = 0, .data = 0, .udata = data.ptr },
 		{ .ident = (uintptr_t)sock, .filter = EVFILT_WRITE, .flags = EV_ADD | EV_CLEAR, .fflags = 0, .data = 0, .udata = data.ptr },
@@ -1012,12 +1044,11 @@ static void x_event_queue_unlock(x_event_queue_t* queue){
 }
 
 static bool x_event_queue_remove(x_event_queue_t* queue, x_socket_t sock){
-	struct kevent ev[3] = {
+	struct kevent ev[2] = {
 		{ .ident = (uintptr_t)sock, .filter = EVFILT_READ, .flags = EV_DELETE, .fflags = 0, .data = 0, .udata = 0 },
-		{ .ident = (uintptr_t)sock, .filter = EVFILT_WRITE, .flags = EV_DELETE, .fflags = 0, .data = 0, .udata = 0 },
-		{ .ident = (uintptr_t)sock, .filter = EVFILT_EXCEPT, .flags = EV_DELETE, .fflags = 0, .data = 0, .udata = 0 },
+		{ .ident = (uintptr_t)sock, .filter = EVFILT_WRITE, .flags = EV_DELETE, .fflags = 0, .data = 0, .udata = 0 }
 	};
-	return !kevent(queue->_fd, ev, 3, 0, 0, 0);
+	return !kevent(queue->_fd, ev, 2, 0, 0, 0);
 }
 
 static void x_event_queue_wake(x_event_queue_t* queue, uint64_t when){
@@ -1064,9 +1095,9 @@ static void x_randombytes(void* data, size_t len){ arc4random_buf(data, len); }
 #endif
 
 #ifdef __cplusplus
-#ifdef _MSC_VER
-#pragma warning(pop)
-#else
-#pragma GCC diagnostic pop
-#endif
+	#ifdef _MSC_VER
+		#pragma warning(pop)
+	#else
+		#pragma GCC diagnostic pop
+	#endif
 #endif

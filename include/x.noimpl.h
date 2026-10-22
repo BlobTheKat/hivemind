@@ -1,3 +1,4 @@
+#include "x.h"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -16,7 +17,7 @@ typedef HANDLE x_file_t;
 typedef struct{
 	HANDLE hFind;
 	_WIN32_FIND_DATAA a;
-} *x_folder_list_t;
+}* x_folder_list_t;
 typedef SOCKET x_socket_t;
 static const x_file_t X_FILE_INVALID = (x_file_t) INVALID_HANDLE_VALUE;
 static const x_socket_t X_SOCKET_INVALID = (x_socket_t) INVALID_SOCKET;
@@ -38,27 +39,27 @@ typedef int x_socket_t;
 static const x_socket_t X_SOCKET_INVALID = (x_socket_t) -1;
 #endif
 
-union x_userdata_t{
+typedef union x_userdata{
 	void* ptr;
 	x_socket_t socket;
 	uint32_t u32;
 	uintptr_t uptr;
-};
+} x_userdata_t;
 
-typedef struct{
+typedef struct x_event{
 	uint32_t type;
-	union x_userdata_t data;
+	x_userdata_t data;
 } x_event_t;
 
 #if defined(__linux__)
-typedef struct{
+typedef struct x_event_queue{
 	int _1, _2;
 	uint64_t _5;
 	uint32_t _4;
 	uint32_t _4[60];
 } x_event_queue_t;
 #else
-typedef struct{
+typedef struct x_event_queue{
 	int _1; uint32_t _2;
 	uint64_t _3;
 	uint32_t _4[((sizeof(uintptr_t)>>2)+1)*20];
@@ -69,7 +70,7 @@ static const uint64_t X_FILE_NOT_FOUND = 0, X_FILE_UNKNOWN = 0,
 	X_FILE_TYPE_FILE = 1,
 	X_FILE_TYPE_FOLDER = 2,
 	X_FILE_TYPE_SPECIAL = 3;
-typedef struct{
+typedef struct x_stat{
 	uint64_t type:8;
 	uint64_t modified:56;
 	uint64_t size;
@@ -77,19 +78,20 @@ typedef struct{
 
 static const uint32_t X_EVENT_SIGNAL = 256, X_EVENT_TIMEOUT = 512, X_EVENT_WAKE = 1024, X_EVENT_EOF = 8192, X_EVENT_CLOSE = 16, X_EVENT_READABLE = 1, X_EVENT_WRITABLE = 4, X_EVENT_ERROR = 8;
 
-typedef union{
+typedef struct ip_addr{ union{
 	struct{ uint8_t bytes[16]; };
 	struct{ uint16_t words[8]; };
 	struct{ uint32_t dwords[4]; };
-} ip_addr_t;
+}; } ip_addr_t;
 
-typedef struct{
+typedef struct remote{
 	ip_addr_t addr;
 	uint16_t port, mtu;
 	uint32_t interface;
 } remote_t;
 
-static const int IP_STR_MAX_LEN = 40;
+static const size_t IP_STR_MAX_LEN = 40;
+static const size_t INTERFACE_STR_MAX_LEN;
 
 // Create a directory
 static bool x_mkdir(const char* name);
@@ -151,6 +153,12 @@ static ip_addr_t ip_from_string(const char* str);
 // Find the index of a network interface from its name, such as "eth0" or "en0". Returns 0 if the interface was not found (0 is never a valid interface index).
 static uint32_t interface_from_str(const char* interface_name);
 
+// Get the name of a network interface from its index, such as "eth0" or "en0". Fills `out` with an empty string the interface was invalid (e.g 0 is never a valid interface index).
+static void interface_to_str(uint32_t i, char out[INTERFACE_STR_MAX_LEN]);
+
+// Find an interface's raw MTU (which will not subtract IP/TCP/UDP/... header sizes)
+static size_t interface_mtu(uint32_t i);
+
 // Stringify an ip_addr_t into a human-readable string, such as "1.2.3.4" or "2001:db8:1001:2002:db8::1234"
 static void ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
 
@@ -158,8 +166,9 @@ static void ip_to_string(ip_addr_t addr, char out[IP_STR_MAX_LEN]);
 // Create a new UDP socket which will automatically select a port/address/interface as needed, ideal for clients
 static x_socket_t x_udp_auto(void);
 
-// Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the MTU for that path. The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
-static void x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from);
+// Get information about which IP and port would be used to send a packet to a specific address, as well as optionally the interface and its MTU for that path (if extinfo is true). The MTU here only counts the maximum UDP payload length, Appropriate IPv4/IPv6 or UDP header sizes are subtracted for you.
+// This function is only guaranteed to succeed once per socket
+static bool x_udp_reflect(x_socket_t s, ip_addr_t to, remote_t* from, bool extinfo);
 
 // Set socket options for a UDP socket, specifically the send and receive buffer sizes. Note that these sizes are not guaranteed to be set to exactly what you specify, the operating system may silently round them up or down, and there may be hard limits on how large they can be.
 static bool x_udp_opts(x_socket_t s, size_t send_buf, size_t recv_buf);
@@ -184,7 +193,7 @@ static void x_socket_free(x_socket_t sock);
 static bool x_event_queue_init(x_event_queue_t* out);
 
 // Add a socket to an event queue, which will emit X_EVENT_READABLE/X_EVENT_WRITABLE/X_EVENT_CLOSED events when the socket becomes readable/writable/closed respectively
-static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, union x_userdata_t data);
+static bool x_event_queue_add(x_event_queue_t* queue, x_socket_t sock, x_userdata_t data);
 
 // Wait for the next event, or up until `timeout` nanoseconds (in which case an X_EVENT_TIMEOUT event is returned), or a process signal is received (in which case an X_EVENT_SIGNAL event is returned). Waiting on the same event queue from multiple threads is well-defined: exactly one of the waiting threads will receive any given event. Which thread receives it is not defined, it may be different even for the same socket, and may not be evenly distributed. A `timeout` of -1 means to wait indefinitely until an event occurs.
 static x_event_t x_event_queue_wait(x_event_queue_t* queue, uint64_t timeout);
